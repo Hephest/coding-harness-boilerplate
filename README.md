@@ -106,8 +106,7 @@ cat /tmp/harness/.gitignore >> .gitignore
 3. **`.claude/protected-paths`**: list your danger zones (auth, billing, migrations, infra…).
 4. **`README.md`, `CHANGELOG.md`, `LICENSE` and `SECURITY.md`**: these describe the boilerplate.
    Replace them with your project's own. `.claude/HARNESS_VERSION` keeps a record of which
-   harness release you started from. The file is created at release, so a copy of unreleased
-   `main` doesn't have it.
+   harness release you started from.
 
 > **You edit the harness files, Claude doesn't.** The guard blocks Claude from changing hooks,
 > `settings.json`, `protected-paths`, `verify.sh`, `herdr-sub.sh`, agents, skills, slash
