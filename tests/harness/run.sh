@@ -304,13 +304,20 @@ settings="$ROOT/.claude/settings.json"
 if command -v jq >/dev/null 2>&1; then
   stop_timeout="$(jq -r '.hooks.Stop[].hooks[] | select(.command | contains("stop-gate.sh")) | .timeout' "$settings")"
   denied="$(jq -r '.permissions.deny[]' "$settings")"
+  asked="$(jq -r '(.permissions.ask // [])[]' "$settings")"
 else
   stop_timeout="$(python3 -c 'import json,sys; print(*[h.get("timeout") for e in json.load(open(sys.argv[1]))["hooks"]["Stop"] for h in e["hooks"] if "stop-gate.sh" in h["command"]])' "$settings")"
   denied="$(python3 -c 'import json,sys; print(*json.load(open(sys.argv[1]))["permissions"]["deny"], sep="\n")' "$settings")"
+  asked="$(python3 -c 'import json,sys; print(*json.load(open(sys.argv[1]))["permissions"].get("ask", []), sep="\n")' "$settings")"
 fi
 [ "$stop_timeout" = 900 ] && ok "settings: stop hook timeout 900" || bad "settings: stop hook timeout 900 (got '$stop_timeout')"
 for rule in 'Bash(git add -f:*)' 'Bash(git add --force:*)'; do
   if grep -qxF "$rule" <<< "$denied"; then ok "settings: denies $rule"; else bad "settings: denies $rule"; fi
+done
+# Deny holds in every mode and has no dialog; ask prompts cleared unattended with nobody answering.
+for rule in 'Bash(git push:*)' 'Bash(git reset:*)' 'Bash(rm:*)'; do
+  if grep -qxF "$rule" <<< "$denied"; then ok "settings: denies $rule"; else bad "settings: denies $rule"; fi
+  if grep -qxF "$rule" <<< "$asked"; then bad "settings: $rule not in ask"; else ok "settings: $rule not in ask"; fi
 done
 
 # ---------------- 6. git env leak ----------------

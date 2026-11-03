@@ -22,7 +22,10 @@
       "Bash(curl:*)",
       "Bash(wget:*)",
       "Bash(git add -f:*)",
-      "Bash(git add --force:*)"
+      "Bash(git add --force:*)",
+      "Bash(git push:*)",
+      "Bash(git reset:*)",
+      "Bash(rm:*)"
     ]
   },
   "env": {
