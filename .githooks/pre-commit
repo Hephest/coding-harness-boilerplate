@@ -3,6 +3,10 @@
 # Runs the harness self-test before every commit, so a broken hook (which fails open) is never
 # committed. Skip once with: git commit --no-verify
 set -uo pipefail
+# git exports GIT_DIR/GIT_INDEX_FILE to hooks. Left in place, every `git -C <fixture>` in the
+# self-test would run against the repo being committed to. Must stay above the first git call.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
 root="$(git rev-parse --show-toplevel)" || exit 1
 [ -x "$root/tests/harness/run.sh" ] || exit 0
 if ! out="$("$root/tests/harness/run.sh" 2>&1)"; then
