@@ -364,11 +364,105 @@ fi
 if g "$fx" check-ignore -q .agent/state/.gitkeep; then bad "gitignore: .gitkeep is ignored"; else ok "gitignore: .gitkeep tracked"; fi
 if g "$fx" check-ignore -q .agent/state/active-task; then ok "gitignore: run state ignored"; else bad "gitignore: run state ignored"; fi
 
-# ---------------- 8. hygiene (maintainers of this boilerplate only) ----------------
+# ---------------- 8. herdr-sub.sh ----------------
+# A subagent that loses maintainer mode gets exit 78 from verify.sh, not the self-test. The stub
+# herdr strips the caller's value, so a headless subagent only sees what the run script exported.
+hs="$(tool_dir herdr-stub)"
+cat > "$hs/herdr" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$HERDR_STUB_LOG"
+case "$1 $2" in
+  "tab create") echo '{"result":{"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"p1"}}}' ;;
+  "pane run")   env -u HARNESS_MAINTAINER bash -c "$4" ;;
+esac
+EOF
+cat > "$hs/claude" <<'EOF'
+#!/usr/bin/env bash
+echo "${HARNESS_MAINTAINER-unset}" > "$HERDR_STUB_LOG.claude"
+EOF
+chmod +x "$hs/herdr" "$hs/claude"
+mkdir -p "$wt/.claude/agents"
+printf -- '---\nname: demo\nmodel: haiku\n---\n' > "$wt/.claude/agents/demo.md"
+
+# herdr_case <name> <caller's HARNESS_MAINTAINER, "" = unset> <in tab env: yes|no> <run script's value, "" = interactive> [start opts]
+herdr_case() {
+  local name="$1" maint="$2" want_tab="$3" want_run="$4" log="$aux/herdr.log" got_tab=no got_run launched='^pane run '
+  shift 4
+  [ -n "$want_run" ] || launched='^agent start '
+  rm -f "$log" "$log.claude"
+  if ! ( cd "$wt" || exit 1
+         unset HARNESS_MAINTAINER HERDR_SUB_CLAUDE_ARGS
+         [ -n "$maint" ] && export HARNESS_MAINTAINER="$maint"
+         HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 HERDR_STUB_LOG="$log" PATH="$hs:$PATH" \
+           "$ROOT/scripts/herdr-sub.sh" start demo "hello" "$@" ) >/dev/null 2>&1; then
+    bad "herdr-sub: $name (start failed)"; return
+  fi
+  # Both must have happened, or "absent" below would pass on a run that never started.
+  if ! grep -q '^tab create ' "$log" || ! grep -q "$launched" "$log"; then
+    bad "herdr-sub: $name (no tab or no launch: $(tr '\n' ';' < "$log"))"; return
+  fi
+  grep -q '^tab create .*--env HARNESS_MAINTAINER=1' "$log" && got_tab=yes
+  got_run="$(cat "$log.claude" 2>/dev/null)"
+  if [ "$got_tab" != "$want_tab" ]; then bad "herdr-sub: $name (tab env: want $want_tab, got $got_tab)"
+  elif [ "$got_run" != "$want_run" ]; then bad "herdr-sub: $name (run script: want '$want_run', got '$got_run')"
+  else ok "herdr-sub: $name"; fi
+}
+herdr_case "headless: forwarded when set"    1  yes 1
+herdr_case "headless: absent when unset"     "" no  unset
+herdr_case "headless: only 1 means on"       0  no  unset
+herdr_case "interactive: forwarded when set" 1  yes "" --interactive
+herdr_case "interactive: absent when unset"  "" no  "" --interactive
+
+# ---------------- 9. /finish order ----------------
+# reviewer reads `git diff main...HEAD`, so the commit has to come before it.
+finish="$ROOT/.claude/commands/finish.md"
+step() { grep -nE "^[0-9]+\. .*$1" "$finish" | head -n1 | cut -d: -f1; }
+prev=0; order_ok=1
+for s in 'scripts/verify.sh' 'Commit the work' 'to `reviewer`' 'Write `.agent/receipts' 'Commit the receipt'; do
+  n="$(step "$s")"
+  if [ -z "$n" ] || [ "$n" -le "$prev" ]; then order_ok=0; bad "finish: step out of order: $s"; fi
+  prev="${n:-$prev}"
+done
+[ "$order_ok" = 1 ] && ok "finish: verify, commit, review, receipt, commit receipt"
+
+# ---------------- 10. hygiene (maintainers of this boilerplate only) ----------------
 # Tracked files ship to template users, so nothing from a maintainer's machine may leak into them.
 # The patterns are split so this file doesn't match itself.
+# The public repo slug is the one allowed form of the owner name, exact and case-sensitive, because
+# the docs must link to it. It is cut out of the line, not skipped: a bare name beside it still hits.
+hygiene_hits() { # hygiene_hits <repo>: prints every banned string in its tracked files
+  local names='acade''mos|heph''est' slug='Heph''est/coding-harness-boilerplate' edge='[^[:alnum:]_-]'
+  git -C "$1" grep -nIiE "$names" -- . | sed -E "s#($edge)$slug(\$|$edge)#\1\2#g" | grep -iE "$names"
+  git -C "$1" grep -nIE '/Use''rs/' -- .
+}
+
+# hygiene_case <clean|dirty> <name> <file text>
+hy="$aux/hygiene"; mkdir -p "$hy"; : > "$hy/doc.md"
+g "$hy" init -q; g "$hy" add -A
+hygiene_case() {
+  local got=dirty
+  printf '%s\n' "$3" > "$hy/doc.md"
+  [ -z "$(hygiene_hits "$hy")" ] && got=clean
+  if [ "$got" = "$1" ]; then ok "hygiene: $2"; else bad "hygiene: $2 (want $1, got $got)"; fi
+}
+owner='Heph''est'; slug="$owner/coding-harness-boilerplate"
+hygiene_case clean "nothing banned"           "plain text"
+hygiene_case clean "slug in a url"            "https://github.com/$slug/commits/main"
+hygiene_case clean "slug with .git"           "git clone https://github.com/$slug.git"
+hygiene_case clean "slug twice on a line"     "[$slug](https://github.com/$slug)"
+hygiene_case dirty "bare owner name"          "by $owner"
+hygiene_case dirty "bare name beside slug"    "$slug by $owner"
+hygiene_case dirty "slug in lower case"       "github.com/heph""est/coding-harness-boilerplate"
+hygiene_case dirty "slug in upper case"       "github.com/HEPH""EST/coding-harness-boilerplate"
+hygiene_case dirty "owner's other repo"       "github.com/$owner/other-repo"
+hygiene_case dirty "longer repo name"         "github.com/$slug-private"
+hygiene_case dirty "longer owner name"        "github.com/not$slug"
+hygiene_case dirty "other banned name"        "acade""mos"
+hygiene_case dirty "home path"                "/Use""rs/someone/project"
+hygiene_case dirty "home path beside slug"    "$slug /Use""rs/someone/project"
+
 if [ "${HARNESS_MAINTAINER:-}" = 1 ]; then
-  hits="$( git -C "$ROOT" grep -nIiE 'acade''mos|heph''est' -- .; git -C "$ROOT" grep -nIE '/Use''rs/' -- . )"
+  hits="$(hygiene_hits "$ROOT")"
   if [ -z "$hits" ]; then ok "hygiene: no personal strings in tracked files"
   else bad "hygiene: personal strings in tracked files"; printf '%s\n' "$hits" | sed 's/^/      /'; fi
 else
