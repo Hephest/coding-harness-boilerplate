@@ -14,7 +14,7 @@ the [README](../README.md). It is built on two ideas:
 .
 ├── CLAUDE.md                     # <150 lines: project, commands, workflow, who-does-what
 ├── .claude/
-│   ├── settings.json             # POLICY: allow/ask/deny + hook wiring + default subagent model
+│   ├── settings.json             # POLICY: allow/deny + hook wiring + default subagent model
 │   ├── rules/                    # CONTEXT: path-scoped rules, loaded only for matching paths
 │   │   ├── auth.md               #   example: copy one per sensitive area
 │   │   └── tests.md
@@ -65,7 +65,7 @@ sentence in a prompt.
 | 3 | **Tools / isolation** | Work happens in a throwaway checkout, never on the main branch. | git worktrees; the guard blocks edits on `main`/`master` |
 | 4 | **State** | Progress lives on disk, not in the chat, so a crashed session loses nothing. | `.agent/`: contracts, receipts, active task |
 | 5 | **Sensors** | "Done" is measured by tools, not claimed by the model. | `scripts/verify.sh`: fast check on every edit, full suite at Stop |
-| 6 | **Policy** | Dangerous actions are denied or need a human yes. | `settings.json` allow/ask/deny; the guard protects secrets, the harness itself and `.claude/protected-paths` |
+| 6 | **Policy** | Dangerous actions are denied outright, so nothing depends on a prompt being answered. A human runs them with the `!` prefix. | `settings.json` allow/deny; the guard protects secrets, the harness itself and `.claude/protected-paths` |
 | 7 | **Traces** | Every finished task leaves an audit record, and every failure becomes infrastructure. | receipts and `lessons.md` |
 
 ## Hooks in detail

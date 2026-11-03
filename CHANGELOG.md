@@ -10,6 +10,14 @@ version is recorded in `.claude/HARNESS_VERSION`.
 
 ## [Unreleased]
 
+### Security
+- `git push`, `git reset` and `rm` move from `ask` to `deny` in `settings.json`. An `ask` rule
+  relies on a prompt, and a harness shouldn't depend on one in unattended sessions.
+
+  **Upgrading:** the agent can no longer run these commands at all. Run them yourself with the
+  `!` prefix, or move a rule back to `ask` in `.claude/settings.json` if you always watch your
+  sessions.
+
 ### Planned (v0.2)
 - Guard shell writes (a PreToolUse `Bash` matcher for write-like commands).
 - Contract approval, so the agent can't widen its own scope.

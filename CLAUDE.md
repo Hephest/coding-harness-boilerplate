@@ -83,7 +83,9 @@ Agent tool for them and never run their work in your own pane. Outside Herdr: us
 ## Hard limits (`.claude/settings.json` and the guard hook enforce all but the last)
 
 - Never read or print `.env*`, `secrets/`, keys or tokens.
-- No network calls (`curl`, `wget`) and no `git push` without the user's explicit approval.
+- No network calls (`curl`, `wget`) without the user's explicit approval.
+- `git push`, `git reset` and `rm` are denied to the agent. When one is needed, give the user the
+  exact command to run themselves with the `!` prefix. Don't look for another way to do it.
 - Harness files are human-owned: hooks, `settings.json`, `protected-paths`, agents, skills,
   `verify.sh` and `herdr-sub.sh`. Propose the change; the user applies it.
   See [docs/harness.md](docs/harness.md#harness-files-are-human-owned).
