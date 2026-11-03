@@ -44,6 +44,11 @@ These are tracked for v0.2:
    next one so a session can't be trapped. `verify.sh` exit 78 (no sensors) blocks once per
    session, then allows the stop. A stop that gets through this way isn't verified, so check
    the receipt before you merge.
+9. **`ask` rules only suit sessions you are watching.** A prompt is only as good as whoever
+   answers it. While testing this harness with unattended background sessions, `ask` prompts for
+   `rm` were resolved with nobody answering them, and the cause wasn't found. So `git push`,
+   `git reset` and `rm` are `deny` rules, which hold in every permission mode and show no
+   dialog. Anything you add that must never run unattended belongs in `deny` too.
 
 ## Reporting a vulnerability
 

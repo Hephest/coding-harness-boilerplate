@@ -74,6 +74,9 @@ First public release.
 - `.claude/commands/*` and `tests/harness/*` are now harness files.
 - `settings.json` denies `git add -f` and `git add --force` (prefix match only, see
   [SECURITY.md](SECURITY.md)).
+- `settings.json` denies `git push`, `git reset` and `rm` to the agent. These are `deny` rules,
+  not `ask` rules, so they never depend on a prompt being answered. You run them yourself with
+  the `!` prefix.
 
 [Unreleased]: https://github.com/Hephest/coding-harness-boilerplate/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Hephest/coding-harness-boilerplate/releases/tag/v0.1.0

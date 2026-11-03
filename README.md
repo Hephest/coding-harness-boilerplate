@@ -38,7 +38,7 @@ Writing "please don't" in a prompt helps a little. This boilerplate rests on two
 | **Agent team** | `.claude/agents/` | `Explore` (haiku), `test-runner` (haiku), `reviewer` (sonnet), `architect` (opus) |
 | **Slash commands** | `.claude/commands/` | `/task <id> <goal>` starts a bounded task; `/finish` verifies, commits on the task branch, gets a cold review and writes the receipt |
 | **Skills** | `.claude/skills/` | `debug`, `refactor`, `code-review`, `release`, `herdr-subagents` |
-| **Policy** | `.claude/settings.json` | Allow/ask/deny lists: no `curl`, no `git push` without asking, no reading `.env` |
+| **Policy** | `.claude/settings.json` | Allow and deny lists: no `curl`, `git push`, `git reset` or `rm` for the agent, no reading `.env` |
 | **Task state** | `.agent/` | Contracts, receipts and a lessons log on disk, so they survive a crashed session |
 | **Docs on demand** | `docs/` | Architecture, ADRs and runbooks that Claude opens only when it needs them |
 | **Self-test** | `tests/harness/run.sh` | Proves the hooks still block what they should |
@@ -218,6 +218,12 @@ python3), it blocks the write. It checks the real path behind any symlink, block
 HEAD like `main`, and blocks `.env`, `.env.*`, `.npmrc`, `.netrc`, `id_rsa*`, `*.pem`, `*.key`,
 `*.p12` and `*.pfx` at any depth, as well as a top-level `secrets/` and `.git` internals. Slash
 commands and the self-test are harness files, like the hooks.
+
+`git push`, `git reset` and `rm` are denied to the agent in every permission mode, so they never
+depend on a prompt being answered. When one is needed, Claude gives you the command and you run
+it with the `!` prefix, for example `! git push origin main`. To let the agent do it with a
+prompt instead, move the rule from `deny` to `ask` in `.claude/settings.json`, but only if you
+always watch your sessions.
 
 Run Claude Code with its own permission prompts on, and review diffs before you merge. See
 [SECURITY.md](SECURITY.md) for the threat model and how to report a problem.
