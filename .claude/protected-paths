@@ -1,0 +1,7 @@
+# Danger zones. The guard hook blocks edits here unless a task is active AND its contract lists
+# the file under "## Target files". One glob per line, relative to the repo root.
+# Give each zone a local CLAUDE.md (template: docs/templates/MODULE_CLAUDE.md).
+src/auth/*
+src/billing/*
+migrations/*
+infra/*
