@@ -1,0 +1,33 @@
+name: harness self-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+
+      - name: Tool versions
+        run: |
+          bash --version | head -n1
+          git --version
+          jq --version || true
+          shellcheck --version | head -n2
+
+      - name: Harness self-test
+        run: tests/harness/run.sh
