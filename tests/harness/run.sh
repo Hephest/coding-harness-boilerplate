@@ -428,8 +428,41 @@ done
 # ---------------- 10. hygiene (maintainers of this boilerplate only) ----------------
 # Tracked files ship to template users, so nothing from a maintainer's machine may leak into them.
 # The patterns are split so this file doesn't match itself.
+# The public repo slug is the one allowed form of the owner name, exact and case-sensitive, because
+# the docs must link to it. It is cut out of the line, not skipped: a bare name beside it still hits.
+hygiene_hits() { # hygiene_hits <repo>: prints every banned string in its tracked files
+  local names='acade''mos|heph''est' slug='Heph''est/coding-harness-boilerplate' edge='[^[:alnum:]_-]'
+  git -C "$1" grep -nIiE "$names" -- . | sed -E "s#($edge)$slug(\$|$edge)#\1\2#g" | grep -iE "$names"
+  git -C "$1" grep -nIE '/Use''rs/' -- .
+}
+
+# hygiene_case <clean|dirty> <name> <file text>
+hy="$aux/hygiene"; mkdir -p "$hy"; : > "$hy/doc.md"
+g "$hy" init -q; g "$hy" add -A
+hygiene_case() {
+  local got=dirty
+  printf '%s\n' "$3" > "$hy/doc.md"
+  [ -z "$(hygiene_hits "$hy")" ] && got=clean
+  if [ "$got" = "$1" ]; then ok "hygiene: $2"; else bad "hygiene: $2 (want $1, got $got)"; fi
+}
+owner='Heph''est'; slug="$owner/coding-harness-boilerplate"
+hygiene_case clean "nothing banned"           "plain text"
+hygiene_case clean "slug in a url"            "https://github.com/$slug/commits/main"
+hygiene_case clean "slug with .git"           "git clone https://github.com/$slug.git"
+hygiene_case clean "slug twice on a line"     "[$slug](https://github.com/$slug)"
+hygiene_case dirty "bare owner name"          "by $owner"
+hygiene_case dirty "bare name beside slug"    "$slug by $owner"
+hygiene_case dirty "slug in lower case"       "github.com/heph""est/coding-harness-boilerplate"
+hygiene_case dirty "slug in upper case"       "github.com/HEPH""EST/coding-harness-boilerplate"
+hygiene_case dirty "owner's other repo"       "github.com/$owner/other-repo"
+hygiene_case dirty "longer repo name"         "github.com/$slug-private"
+hygiene_case dirty "longer owner name"        "github.com/not$slug"
+hygiene_case dirty "other banned name"        "acade""mos"
+hygiene_case dirty "home path"                "/Use""rs/someone/project"
+hygiene_case dirty "home path beside slug"    "$slug /Use""rs/someone/project"
+
 if [ "${HARNESS_MAINTAINER:-}" = 1 ]; then
-  hits="$( git -C "$ROOT" grep -nIiE 'acade''mos|heph''est' -- .; git -C "$ROOT" grep -nIE '/Use''rs/' -- . )"
+  hits="$(hygiene_hits "$ROOT")"
   if [ -z "$hits" ]; then ok "hygiene: no personal strings in tracked files"
   else bad "hygiene: personal strings in tracked files"; printf '%s\n' "$hits" | sed 's/^/      /'; fi
 else
