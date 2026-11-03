@@ -31,7 +31,7 @@ the [README](../README.md). It is built on two ideas:
 │   │   ├── task.md               #   /task <id> <goal>  → contract + worktree
 │   │   └── finish.md             #   /finish            → verify, commit, review, receipt
 │   ├── protected-paths           # danger zones: edits need a contract that names the file
-│   ├── HARNESS_VERSION           # which harness release this project started from (created at release)
+│   ├── HARNESS_VERSION           # which harness release this project started from
 │   └── skills/                   # reusable expert modes
 │       ├── herdr-subagents/      #   in Herdr: each subagent runs in its own hidden tab
 │       ├── debug/  refactor/     #   debugging workflow · behaviour-preserving refactors

@@ -55,9 +55,9 @@ inherit our task history. The CHANGELOG is the public record.
 ## Versioning
 
 The harness follows [SemVer](https://semver.org). `.claude/HARNESS_VERSION` is the single source
-of truth and travels into every project created from the template. It is created at release, so
-unreleased `main` doesn't have it. While in `0.x`, minor releases may still contain breaking
-changes, but they are always called out.
+of truth and travels into every project created from the template. It only changes in a release
+commit. While in `0.x`, minor releases may still contain breaking changes, but they are always
+called out.
 
 | Bump | When | Examples |
 |---|---|---|

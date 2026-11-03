@@ -10,6 +10,20 @@ version is recorded in `.claude/HARNESS_VERSION`.
 
 ## [Unreleased]
 
+### Planned (v0.2)
+- Guard shell writes (a PreToolUse `Bash` matcher for write-like commands).
+- Contract approval, so the agent can't widen its own scope.
+- Scope the reviewer agent's Bash access.
+- `herdr-sub.sh` edge cases (orphaned tab on parse failure, argument parsing, quoting, and
+  `run --interactive` returning before the session has finished).
+- `scripts/harness-init.sh` to automate the quickstart.
+- The other limitations in [SECURITY.md](SECURITY.md): shell reads of secrets, force-add flags
+  in any position, unguarded behaviour-shaping files, and the guard's fail-open without `git`.
+
+## [0.1.0] - 2026-11-03
+
+First public release.
+
 ### Added
 - `README.md` for humans: what the harness is, quickstart, workflow, concepts, customizing,
   security model, versioning and credits.
@@ -61,13 +75,5 @@ version is recorded in `.claude/HARNESS_VERSION`.
 - `settings.json` denies `git add -f` and `git add --force` (prefix match only, see
   [SECURITY.md](SECURITY.md)).
 
-### Planned (v0.2)
-- Guard shell writes (a PreToolUse `Bash` matcher for write-like commands).
-- Contract approval, so the agent can't widen its own scope.
-- Scope the reviewer agent's Bash access.
-- `herdr-sub.sh` edge cases (orphaned tab on parse failure, argument parsing, quoting).
-- `scripts/harness-init.sh` to automate the quickstart.
-- The other limitations in [SECURITY.md](SECURITY.md): shell reads of secrets, force-add flags
-  in any position, unguarded behaviour-shaping files, and the guard's fail-open without `git`.
-
-[Unreleased]: https://github.com/Hephest/coding-harness-boilerplate/commits/main
+[Unreleased]: https://github.com/Hephest/coding-harness-boilerplate/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Hephest/coding-harness-boilerplate/releases/tag/v0.1.0
