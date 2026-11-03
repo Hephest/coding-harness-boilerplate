@@ -70,8 +70,16 @@ agent definition asks for.
 $prompt
 EOF
 
+  # Maintainer mode follows the caller. The tab env reaches both modes: `herdr agent start` has no
+  # env option, so an interactive session inherits it from the tab's shell.
+  local maint_env=() maint_export=""
+  if [ "${HARNESS_MAINTAINER:-}" = 1 ]; then
+    maint_env=(--env HARNESS_MAINTAINER=1); maint_export="export HARNESS_MAINTAINER=1"
+  fi
+
   out="$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$ROOT" --label "sub:$id" \
-          --env "HARNESS_ROLE=$role" --env "HARNESS_RUN_ID=$id" --no-focus 2>&1)" \
+          --env "HARNESS_ROLE=$role" --env "HARNESS_RUN_ID=$id" ${maint_env[@]+"${maint_env[@]}"} \
+          --no-focus 2>&1)" \
     || die "tab create failed: $out"
   tab="$(jget '.result.tab.tab_id , .result.tab.id , .result.tab' "$out")"
   pane="$(jget '.result.root_pane.pane_id , .result.root_pane.id , .result.root_pane' "$out")"
@@ -86,6 +94,7 @@ EOF
 #!/usr/bin/env bash
 cd "$ROOT" || exit 1
 export HARNESS_ROLE="$role" HARNESS_RUN_ID="$id"
+$maint_export
 echo "[herdr-sub] $id ($role${model:+ on $model}) running…"
 claude -p --agent "$role" ${model:+--model "$model"} ${HERDR_SUB_CLAUDE_ARGS:-} \\
   < "$dir/prompt.md" > "$dir/report.md" 2> "$dir/stderr.log"
