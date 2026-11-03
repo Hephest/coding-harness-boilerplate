@@ -10,14 +10,6 @@ version is recorded in `.claude/HARNESS_VERSION`.
 
 ## [Unreleased]
 
-### Security
-- `git push`, `git reset` and `rm` move from `ask` to `deny` in `settings.json`. An `ask` rule
-  relies on a prompt, and a harness shouldn't depend on one in unattended sessions.
-
-  **Upgrading:** the agent can no longer run these commands at all. Run them yourself with the
-  `!` prefix, or move a rule back to `ask` in `.claude/settings.json` if you always watch your
-  sessions.
-
 ### Planned (v0.2)
 - Guard shell writes (a PreToolUse `Bash` matcher for write-like commands).
 - Contract approval, so the agent can't widen its own scope.
@@ -82,6 +74,9 @@ First public release.
 - `.claude/commands/*` and `tests/harness/*` are now harness files.
 - `settings.json` denies `git add -f` and `git add --force` (prefix match only, see
   [SECURITY.md](SECURITY.md)).
+- `settings.json` denies `git push`, `git reset` and `rm` to the agent. These are `deny` rules,
+  not `ask` rules, so they never depend on a prompt being answered. You run them yourself with
+  the `!` prefix.
 
 [Unreleased]: https://github.com/Hephest/coding-harness-boilerplate/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Hephest/coding-harness-boilerplate/releases/tag/v0.1.0
