@@ -1,5 +1,8 @@
 # Architecture
 
+> **This is a template: fill it in.** Everything in `<angle brackets>` is a placeholder, and the
+> paths below are examples. Until you replace them, this page says nothing about your project.
+>
 > One page. If it grows past ~150 lines, split a section into its own doc and link it.
 
 ## Purpose

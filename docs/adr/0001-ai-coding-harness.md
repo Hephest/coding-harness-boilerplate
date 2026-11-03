@@ -1,7 +1,7 @@
 # ADR-0001: Use an enforced harness for AI coding agents
 
 - **Status:** accepted
-- **Date:** YYYY-MM-DD
+- **Date:** 2026-11-03
 
 ## Context
 AI agents follow prose instructions unreliably under long contexts. They skip tests, edit outside
@@ -12,6 +12,9 @@ Rules that must always hold live in infrastructure, not prose: hooks (`.claude/h
 permissions (`.claude/settings.json`), one verify script (`scripts/verify.sh`), and bounded task
 contracts (`.agent/contracts/`). Cheap models do reading and test runs; the top model only
 plans and judges. Inside Herdr, subagents run in hidden tabs (`scripts/herdr-sub.sh`).
+
+What the harness must guarantee is written down as
+[the seven invariants](../harness.md#the-seven-invariants).
 
 ## Consequences
 - "Done" means `scripts/verify.sh` exits 0 and a receipt exists. Nothing else counts.

@@ -24,20 +24,26 @@ scripts/        verify.sh (definition of done), herdr-sub.sh (background subagen
 Don't load these up front; open the one you need.
 - How it fits together → `docs/architecture.md` · Why it's built this way → `docs/adr/`
 - How to operate it → `docs/runbooks/` · Module gotchas → the module's local `CLAUDE.md`
+- How the harness works (hooks, invariants, maintainer mode) → [docs/harness.md](docs/harness.md)
 - If code and docs disagree, fix the doc in the same task.
 
 ## Skills
 
-`debug` · `refactor` · `code-review` · `release` · `herdr-subagents`. Use the matching skill
-instead of improvising the workflow.
+`debug` · `refactor` · `code-review` · `herdr-subagents`. Use the matching skill instead of
+improvising the workflow. `release` only runs when the user types `/release`.
 
 ## Commands
 
+- Start a task (steps 1–2 below): `/task <task-id> <goal>`
+- Close a task (steps 4–7 below): `/finish`
 - Verify everything (the only "done" signal): `scripts/verify.sh`
 - Fast check one file: `scripts/verify.sh --fast <file>`
 - Run app locally: `<command>`
 
 ## Workflow: every non-trivial task
+
+`/task` covers steps 1–2 and marks the task active in `.agent/state/active-task`, which is what
+makes the guard enforce the contract. `/finish` covers steps 4–7.
 
 1. **Contract first.** Copy `.agent/contracts/TEMPLATE.md` to `.agent/contracts/<task-id>.md`
    and fill in: target files (≤5), acceptance criteria, out-of-scope, attempt ceiling.
@@ -48,7 +54,8 @@ instead of improvising the workflow.
 3. **Build** inside the contract's target files only.
 4. **Verify** with `scripts/verify.sh`. Exit code 0 is the only evidence that counts.
    Never say "tests pass" without having run them in this session.
-5. **Review** in cold context: send the contract, `git diff`, and verify output to `reviewer`.
+5. **Review** in cold context: send `reviewer` only the task id. It reads the contract and the
+   diff and runs verify itself.
 6. **Receipt.** Write `.agent/receipts/<task-id>.md` from the template before calling the task done.
 7. **Immunize.** If something failed along the way, add one line to `.agent/lessons.md`
    and turn it into infrastructure (a rule, a test fixture, a script, or a hook).
@@ -67,11 +74,17 @@ Agent tool for them and never run their work in your own pane. Outside Herdr: us
 
 ## Loop breaker
 
-- Max 3 repair attempts per failure. If the same verify error appears twice, stop and ask `architect`.
+- Max 3 repair attempts per failure. The same error twice is the cue to ask `architect` before
+  the third try.
+- The Stop gate stops the loop after the 3rd identical `verify.sh` failure: stop, ask `architect`,
+  then report to the user.
 - If `architect` can't unblock it, stop and report to the user with the failing output.
 
-## Hard limits (also enforced in `.claude/settings.json`)
+## Hard limits (`.claude/settings.json` and the guard hook enforce all but the last)
 
 - Never read or print `.env*`, `secrets/`, keys or tokens.
 - No network calls (`curl`, `wget`) and no `git push` without the user's explicit approval.
+- Harness files are human-owned: hooks, `settings.json`, `protected-paths`, agents, skills,
+  `verify.sh` and `herdr-sub.sh`. Propose the change; the user applies it.
+  See [docs/harness.md](docs/harness.md#harness-files-are-human-owned).
 - No new dependencies unless the contract lists them.
