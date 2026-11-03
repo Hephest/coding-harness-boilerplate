@@ -6,5 +6,6 @@ Every failure gets one line here and one permanent fix. A fix that lives only in
 |------|---------|-------|--------------------------|
 | YYYY-MM-DD | Agent edited generated file `src/gen/api.ts` | scope creep | Added `src/gen/**` to guard-write.sh protected paths |
 | YYYY-MM-DD | Missed null session on logout | logic bug | Regression test `tests/auth/test_logout_null_session.py` |
+| 2026-11-03 | Guard allowed writes inside `.git`: no work tree there, so `repo_root` was empty and it exited 0 | permission boundary | Full-path check in guard-write.sh, `git internals` cases in `tests/harness/run.sh` |
 
 Classes: context gap (→ rule or doc) · tool gap (→ script/CLI) · permission boundary (→ settings.json/hook) · logic bug (→ test fixture) · scope creep (→ contract/guard)

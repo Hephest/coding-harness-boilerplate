@@ -11,10 +11,12 @@ Code's permission prompts, git review before merging, and least-privilege creden
 
 | In scope (the harness should stop it) | Out of scope (use other controls) |
 |---|---|
-| Claude editing secrets (`.env`, keys, `secrets/`) through Edit/Write | Arbitrary shell commands that write files or read secrets |
-| Claude editing on `main` instead of a task worktree | A user who disables hooks or runs with `--dangerously-skip-permissions` |
-| Claude editing files outside the active contract or in a danger zone | Malicious code in your dependencies or MCP servers |
-| Claude changing its hooks, `settings.json`, agents, skills, `protected-paths`, `verify.sh` or `herdr-sub.sh` | Compromised machine or Claude Code installation |
+| Claude editing secrets through Edit/Write: `.env*`, `.npmrc`, `.netrc`, `id_rsa*`, `*.p12`, `*.pfx` at any depth, `*.pem`, `*.key`, top-level `secrets/` | Arbitrary shell commands that write files or read secrets |
+| Claude editing on `main` or a detached HEAD instead of a task worktree | A user who disables hooks or runs with `--dangerously-skip-permissions` |
+| Claude editing files outside the active contract or in a danger zone, also through a symlink | Malicious code in your dependencies or MCP servers |
+| Claude changing its hooks, `settings.json`, agents, skills, slash commands, `protected-paths`, `verify.sh`, `herdr-sub.sh` or the self-test in `tests/harness/` | Compromised machine or Claude Code installation |
+| Claude editing `.git` internals | |
+| A write going through unchecked because the hook input can't be parsed (the guard fails closed) | |
 | Claude declaring "done" while `verify.sh` fails | |
 
 ## Known limitations (v0.1)
@@ -30,9 +32,9 @@ These are tracked for v0.2:
    `secrets/**`, `*.pem` and `*.key`, but not `cat .env` through Bash.
 4. **`git add -f`** can stage an ignored secret. Review what you commit.
 5. **The reviewer agent has unrestricted Bash** so it can run `verify.sh`.
-6. **Not every behaviour-shaping file is guarded.** `CLAUDE.md`, `.claude/rules/`,
-   `.claude/commands/`, `tests/harness/` and `.agent/lessons.md` stay writable through
-   Edit/Write, and `NotebookEdit` isn't matched by the guard at all.
+6. **Not every behaviour-shaping file is guarded.** `CLAUDE.md`, `.claude/rules/` and
+   `.agent/lessons.md` stay writable through Edit/Write, and `NotebookEdit` isn't matched by
+   the guard at all.
 
 ## Reporting a vulnerability
 

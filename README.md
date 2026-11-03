@@ -104,7 +104,8 @@ cat /tmp/harness/.gitignore >> .gitignore
    harness release you started from.
 
 > **You edit the harness files, Claude doesn't.** The guard blocks Claude from changing hooks,
-> `settings.json`, `verify.sh`, agents and skills. It can propose a change, and you apply it.
+> `settings.json`, `verify.sh`, agents, skills, slash commands and the self-test. It can
+> propose a change, and you apply it.
 > An agent that can rewrite its own sensors has no sensors.
 
 ### 3. First commit, first task
@@ -199,7 +200,12 @@ and keep honest mistakes small. They do not stop a determined adversary. Known g
 - `settings.json` denies *reading* `.env` with the Read tool, but a shell `cat .env` isn't
   covered by that rule.
 - Not every file that shapes the agent's behaviour is guarded. `CLAUDE.md`, `.claude/rules/`
-  and `.claude/commands/` stay editable, and notebook edits aren't checked.
+  and `.agent/lessons.md` stay editable, and notebook edits aren't checked.
+
+The guard itself fails closed: if it can't parse its input (no jq, no working python3), it
+blocks the write. It checks the real path behind any symlink, blocks a detached HEAD like
+`main`, and blocks `.env*`, `.npmrc`, `.netrc`, `id_rsa*`, `*.p12` and `*.pfx` at any depth, as
+well as `.git` internals. Slash commands and the self-test are harness files, like the hooks.
 
 Run Claude Code with its own permission prompts on, and review diffs before you merge. See
 [SECURITY.md](SECURITY.md) for the threat model and how to report a problem.
