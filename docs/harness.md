@@ -29,9 +29,9 @@ the [README](../README.md). It is built on two ideas:
 │   │   └── stop-gate.sh          #   Stop: verify.sh must pass + receipt must exist; loop breaker
 │   ├── commands/
 │   │   ├── task.md               #   /task <id> <goal>  → contract + worktree
-│   │   └── finish.md             #   /finish            → verify, review, receipt, commit
+│   │   └── finish.md             #   /finish            → verify, commit, review, receipt
 │   ├── protected-paths           # danger zones: edits need a contract that names the file
-│   ├── HARNESS_VERSION           # which harness release this project started from
+│   ├── HARNESS_VERSION           # which harness release this project started from (created at release)
 │   └── skills/                   # reusable expert modes
 │       ├── herdr-subagents/      #   in Herdr: each subagent runs in its own hidden tab
 │       ├── debug/  refactor/     #   debugging workflow · behaviour-preserving refactors
@@ -40,7 +40,7 @@ the [README](../README.md). It is built on two ideas:
 │   ├── contracts/TEMPLATE.md     #   bounded scope: ≤5 files, testable criteria, attempt ceiling
 │   ├── receipts/TEMPLATE.md      #   15-second audit of every finished task
 │   ├── lessons.md                #   failure → permanent fix log
-│   └── state/                    #   active task, failure counters, subagent runs (gitignored)
+│   └── state/                    #   active task, Stop gate counters, subagent runs (gitignored)
 ├── docs/                         # PROGRESSIVE CONTEXT: read on demand, never preloaded
 │   ├── harness.md                #   this file
 │   ├── architecture.md           #   components, data flow, invariants, danger zones (fill in)
@@ -72,12 +72,42 @@ sentence in a prompt.
 
 | Hook | Event | Blocks when | Exit codes |
 |---|---|---|---|
-| `guard-write.sh` | PreToolUse on Edit/Write/MultiEdit | secrets or `.git/`; local permission file; harness files (unless maintainer mode); edits on `main`; files outside the active contract; danger zones not named in the contract | 2 = blocked (reason goes to Claude), 0 = allowed |
+| `guard-write.sh` | PreToolUse on Edit/Write/MultiEdit | hook input it can't parse; secrets or `.git` internals; local permission file; harness files (unless maintainer mode); edits on `main`, `master` or a detached HEAD; files outside the active contract; danger zones not named in the contract | 2 = blocked (reason goes to Claude), 0 = allowed |
 | `post-edit-check.sh` | PostToolUse on Edit/Write/MultiEdit | `verify.sh --fast <file>` fails (format, lint, syntax of that one file) | 2 = error sent back to Claude to fix now |
-| `stop-gate.sh` | Stop | branch has changes and `verify.sh` fails; or the active task has no receipt | 2 = "keep working"; after 3 identical failures the loop breaker lets Claude stop and escalate |
+| `stop-gate.sh` | Stop | branch has changes and `verify.sh` fails; or `verify.sh` passes and the active task has no receipt | 2 = "keep working", at most 3 stops in a row; 0 = allowed |
 
 `.agent/` is always writable, also on `main`, so `/task` can write a contract before the
 worktree exists.
+
+**What the guard protects.** It resolves symlinks first, then checks the real path:
+
+- **Git internals:** any `.git` file or directory. This check runs before anything else.
+- **Secrets**, also in maintainer mode: `.env`, `.env.*`, `.npmrc`, `.netrc`, `id_rsa*`, `*.pem`,
+  `*.key`, `*.p12` and `*.pfx` at any depth, and everything under a top-level `secrets/`.
+- **Local permissions**, also in maintainer mode: `.claude/settings.local.json`.
+- **Harness files**, unless in maintainer mode: `.claude/hooks/*`, `.claude/settings.json`,
+  `.claude/protected-paths`, `.claude/agents/*`, `.claude/skills/*`, `.claude/commands/*`,
+  `scripts/verify.sh`, `scripts/herdr-sub.sh` and `tests/harness/*`.
+
+The guard fails closed: hook input it can't parse (malformed, or no `jq` and no working `python3`)
+blocks the write. It has one known fail-open. It finds the repo with `git`, so if `git` is missing
+every path looks like it's outside a repo, only the `.git` check runs, and the write is allowed.
+Outside a git repo there is nothing to guard, so that case is allowed on purpose.
+
+**How the Stop gate decides.** Subagent sessions (`HARNESS_ROLE` set) skip it, and so does a
+branch with no changes against `main` outside `.agent/`. Otherwise it runs `verify.sh`, with a
+hook timeout of 900 seconds:
+
+- **Exit 78 (no sensors):** there is nothing to fix in code, so it blocks once per session and
+  allows the next stop. This never counts toward the loop breaker, and the receipt isn't checked.
+- **Any other failure, or a missing receipt:** a blocked stop. The loop breaker counts blocked
+  stops in a row per session and ignores the failure text, which can differ on every run. The 3rd
+  block is the last, and tells Claude to ask `architect` and report to the user. The next stop is
+  allowed. A count that can't be saved also allows the stop, because it couldn't be bounded.
+- **Exit 0 with a receipt, or no active task:** the stop is allowed and the count resets.
+
+The counts live in `.agent/state/stop-blocks-<session_id>` and
+`.agent/state/sensors-warned-<session_id>`.
 
 ### `verify.sh` exit codes
 
@@ -90,12 +120,14 @@ worktree exists.
 ## Harness files are human-owned
 
 The guard blocks Claude from editing hooks, `settings.json`, `protected-paths`, agents, skills,
-`verify.sh` and `herdr-sub.sh`. Claude proposes a change and you apply it. This is deliberate:
-an agent that can rewrite its own sensors has no sensors.
+slash commands, `verify.sh`, `herdr-sub.sh` and the self-test in `tests/harness/`. Claude proposes
+a change and you apply it. This is deliberate: an agent that can rewrite its own sensors has no
+sensors.
 
 **Maintainer mode** is only for developing this boilerplate itself. Start Claude with
 `HARNESS_MAINTAINER=1 claude` from inside a task worktree, and the guard allows harness edits.
-Secrets, `.claude/settings.local.json`, main-branch isolation and contract scope stay enforced.
+Secrets, `.git` internals, `.claude/settings.local.json`, main-branch isolation and contract scope
+stay enforced.
 With no project sensors configured, `verify.sh` then runs `tests/harness/run.sh` instead. Don't
 use maintainer mode in a normal project.
 

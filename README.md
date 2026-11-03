@@ -33,10 +33,10 @@ Writing "please don't" in a prompt helps a little. This boilerplate rests on two
 |---|---|---|
 | **Guard** | `.claude/hooks/guard-write.sh` | Blocks writes to secrets, to `main`, to harness files and danger zones, and, while a task is active, to anything outside its contract |
 | **Fast sensor** | `.claude/hooks/post-edit-check.sh` | Checks each file right after Claude edits it: syntax always, plus format and lint where ruff, prettier or eslint is installed |
-| **Stop gate** | `.claude/hooks/stop-gate.sh` | Claude can't end its turn while `verify.sh` fails or the task has no receipt, with a loop breaker after 3 identical failures |
+| **Stop gate** | `.claude/hooks/stop-gate.sh` | Claude can't end its turn while `verify.sh` fails or the task has no receipt, with a loop breaker after 3 blocked stops in a row |
 | **Definition of done** | `scripts/verify.sh` | One script for typecheck, lint and tests. Exit 0 is the only proof that counts |
 | **Agent team** | `.claude/agents/` | `Explore` (haiku), `test-runner` (haiku), `reviewer` (sonnet), `architect` (opus) |
-| **Slash commands** | `.claude/commands/` | `/task <id> <goal>` starts a bounded task; `/finish` verifies, reviews, writes a receipt and commits |
+| **Slash commands** | `.claude/commands/` | `/task <id> <goal>` starts a bounded task; `/finish` verifies, commits on the task branch, gets a cold review and writes the receipt |
 | **Skills** | `.claude/skills/` | `debug`, `refactor`, `code-review`, `release`, `herdr-subagents` |
 | **Policy** | `.claude/settings.json` | Allow/ask/deny lists: no `curl`, no `git push` without asking, no reading `.env` |
 | **Task state** | `.agent/` | Contracts, receipts and a lessons log on disk, so they survive a crashed session |
@@ -56,11 +56,16 @@ flowchart LR
     G --> D
     D --> S{{"Stop gate<br/>verify.sh"}}
     S -- fails --> D
-    S -- passes --> F["/finish"]
-    F --> R["Cold review<br/>reviewer agent"]
+    S -- passes --> F["/finish<br/>verify.sh"]
+    F -- fails --> D
+    F -- passes --> K["Commit<br/>task branch"]
+    K --> R["Cold review<br/>reviewer agent"]
     R -- REJECT --> D
     R -- ACCEPT --> P["Receipt + commit<br/>(you push)"]
 ```
+
+`/finish` commits before the review so the reviewer can see the work in `git diff main...HEAD`.
+Review fixes are new commits, and the receipt records the real SHA.
 
 Nothing is pushed or merged for you. The agent prepares the work and you publish it.
 
@@ -82,10 +87,10 @@ Pick one:
 # A. New repo on GitHub: click "Use this template" on the repo page, then clone your copy.
 
 # B. New local project without git history
-npx degit OWNER/coding-harness-boilerplate my-app && cd my-app
+npx degit Hephest/coding-harness-boilerplate my-app && cd my-app
 
 # C. Existing project: copy the harness in (check for clashes with your CLAUDE.md / .gitignore)
-git clone --depth 1 https://github.com/OWNER/coding-harness-boilerplate /tmp/harness
+git clone --depth 1 https://github.com/Hephest/coding-harness-boilerplate /tmp/harness
 cp -R /tmp/harness/{.claude,.agent,scripts,tests,docs,CLAUDE.md} .
 cat /tmp/harness/.gitignore >> .gitignore
 ```
@@ -101,11 +106,12 @@ cat /tmp/harness/.gitignore >> .gitignore
 3. **`.claude/protected-paths`**: list your danger zones (auth, billing, migrations, infra…).
 4. **`README.md`, `CHANGELOG.md`, `LICENSE` and `SECURITY.md`**: these describe the boilerplate.
    Replace them with your project's own. `.claude/HARNESS_VERSION` keeps a record of which
-   harness release you started from.
+   harness release you started from. The file is created at release, so a copy of unreleased
+   `main` doesn't have it.
 
 > **You edit the harness files, Claude doesn't.** The guard blocks Claude from changing hooks,
-> `settings.json`, `verify.sh`, agents, skills, slash commands and the self-test. It can
-> propose a change, and you apply it.
+> `settings.json`, `protected-paths`, `verify.sh`, `herdr-sub.sh`, agents, skills, slash
+> commands and the self-test. It can propose a change, and you apply it.
 > An agent that can rewrite its own sensors has no sensors.
 
 ### 3. First commit, first task
@@ -136,16 +142,18 @@ claude  Worktree ready. Continue from .worktrees/fix-login-redirect
 guard   BLOCKED: 'src/routes/redirect.ts' is outside the contract for 'fix-login-redirect'.
 claude  That file needs to change too. Can I add it to the contract?
         … tries to stop …
-gate    NOT DONE: scripts/verify.sh failed (exit 1), attempt 1/3. Last lines: …
+gate    NOT DONE (blocked stop 1/3): scripts/verify.sh failed (exit 1). Last lines: …
         … fixes the test …
 you     /finish
-claude  verify: PASS · reviewer: ACCEPT · receipt: .agent/receipts/fix-login-redirect.md
-        Committed on task/fix-login-redirect. Not pushed.
+claude  verify: PASS · committed on task/fix-login-redirect
+        reviewer: ACCEPT · receipt: .agent/receipts/fix-login-redirect.md
+        Not pushed.
 ```
 
 Each message from the guard or the gate tells Claude exactly what to do next. When something
-keeps failing, the loop breaker steps in after three identical failures. Claude stops, asks the
-`architect`, and reports to you instead of burning tokens.
+keeps failing, the gate blocks at most three stops in a row, even if the failure text changes
+each time. The third block tells Claude to ask the `architect` and report to you, and the next
+stop goes through, so a stuck task doesn't burn tokens.
 
 ## Concepts
 
@@ -155,7 +163,7 @@ keeps failing, the loop breaker steps in after three identical failures. Claude 
 | **Worktree** | Each task gets its own checkout on a `task/<id>` branch under `.worktrees/`. `main` stays clean, and you can throw a failed attempt away with one command. |
 | **Guard** | A PreToolUse hook that runs before every Edit/Write. Exit 2 blocks the write and tells Claude why. |
 | **Sensors** | Tools that measure "done": the fast check per edit, and the full `verify.sh` at the Stop gate. |
-| **Stop gate & loop breaker** | Claude can't finish while `verify.sh` fails. After 3 identical failures it may stop, but only to escalate. The very first "no sensors configured" is shown once per session, so a fresh project doesn't trap you. |
+| **Stop gate & loop breaker** | Claude can't finish while `verify.sh` fails or the active task has no receipt. The gate blocks at most 3 stops in a row, whatever the failure text says, and then lets Claude stop so it can escalate. "No sensors configured" (`verify.sh` exit 78) blocks once per session, then allows the stop, and never counts toward the loop breaker, so a fresh project doesn't trap you. |
 | **Receipt** | `.agent/receipts/<id>.md`: a 15-second audit covering status, verify result, reviewer verdict, files changed and attempts used. |
 | **Lessons → infrastructure** | Every failure gets one line in `.agent/lessons.md` **and** a permanent fix: a rule, test fixture, script or hook. A fix that lives only in a chat is lost. |
 | **Danger zones** | Paths in `.claude/protected-paths`. They can only be edited when the active contract names them specifically. Give each one a local `CLAUDE.md` ([template](docs/templates/MODULE_CLAUDE.md)). |
@@ -201,11 +209,16 @@ and keep honest mistakes small. They do not stop a determined adversary. Known g
   covered by that rule.
 - Not every file that shapes the agent's behaviour is guarded. `CLAUDE.md`, `.claude/rules/`
   and `.agent/lessons.md` stay editable, and notebook edits aren't checked.
+- The force-add deny only matches a command's prefix. `git add -f` is denied, but
+  `git add -A -f` may pass.
+- The guard needs `git`. Without it, every path looks like it's outside a repo, so only the
+  `.git` check runs and the write is allowed.
 
-The guard itself fails closed: if it can't parse its input (no jq, no working python3), it
-blocks the write. It checks the real path behind any symlink, blocks a detached HEAD like
-`main`, and blocks `.env*`, `.npmrc`, `.netrc`, `id_rsa*`, `*.p12` and `*.pfx` at any depth, as
-well as `.git` internals. Slash commands and the self-test are harness files, like the hooks.
+The guard itself fails closed: if it can't parse its input (malformed, or no jq and no working
+python3), it blocks the write. It checks the real path behind any symlink, blocks a detached
+HEAD like `main`, and blocks `.env`, `.env.*`, `.npmrc`, `.netrc`, `id_rsa*`, `*.pem`, `*.key`,
+`*.p12` and `*.pfx` at any depth, as well as a top-level `secrets/` and `.git` internals. Slash
+commands and the self-test are harness files, like the hooks.
 
 Run Claude Code with its own permission prompts on, and review diffs before you merge. See
 [SECURITY.md](SECURITY.md) for the threat model and how to report a problem.
@@ -213,7 +226,8 @@ Run Claude Code with its own permission prompts on, and review diffs before you 
 ## Versioning and upgrading
 
 The harness uses [Semantic Versioning](https://semver.org). The current version is in
-`.claude/HARNESS_VERSION`, and every change is listed in [CHANGELOG.md](CHANGELOG.md).
+`.claude/HARNESS_VERSION`, which is created at release, and every change is listed in
+[CHANGELOG.md](CHANGELOG.md).
 
 - **Major:** something you must act on, such as a changed contract format, a renamed script or
   command, or new hook wiring.
