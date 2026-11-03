@@ -226,8 +226,7 @@ Run Claude Code with its own permission prompts on, and review diffs before you 
 ## Versioning and upgrading
 
 The harness uses [Semantic Versioning](https://semver.org). The current version is in
-`.claude/HARNESS_VERSION`, which is created at release, and every change is listed in
-[CHANGELOG.md](CHANGELOG.md).
+`.claude/HARNESS_VERSION`, and every change is listed in [CHANGELOG.md](CHANGELOG.md).
 
 - **Major:** something you must act on, such as a changed contract format, a renamed script or
   command, or new hook wiring.

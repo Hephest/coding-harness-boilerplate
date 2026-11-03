@@ -76,8 +76,8 @@ Agent tool for them and never run their work in your own pane. Outside Herdr: us
 
 - Max 3 repair attempts per failure. The same error twice is the cue to ask `architect` before
   the third try.
-- The Stop gate stops the loop after the 3rd identical `verify.sh` failure: stop, ask `architect`,
-  then report to the user.
+- The Stop gate stops the loop after 3 blocked stops in a row, whatever the failure: stop, ask
+  `architect`, then report to the user.
 - If `architect` can't unblock it, stop and report to the user with the failing output.
 
 ## Hard limits (`.claude/settings.json` and the guard hook enforce all but the last)
