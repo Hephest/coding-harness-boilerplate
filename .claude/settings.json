@@ -25,7 +25,9 @@
       "Read(**/*.pem)",
       "Read(**/*.key)",
       "Bash(curl:*)",
-      "Bash(wget:*)"
+      "Bash(wget:*)",
+      "Bash(git add -f:*)",
+      "Bash(git add --force:*)"
     ]
   },
   "env": {
@@ -51,7 +53,7 @@
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop-gate.sh" }
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop-gate.sh", "timeout": 900 }
         ]
       }
     ]

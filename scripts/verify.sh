@@ -67,7 +67,9 @@ if [ "${1:-}" = "--fast" ]; then
     *.ts|*.tsx|*.js|*.jsx)
                    [ -x node_modules/.bin/eslint ] && run "eslint $f" "node_modules/.bin/eslint '$f'" ;;
     *.sh)          run "bash -n $f" "bash -n '$f'" ;;
-    *.json)        run "json $f" "python3 -m json.tool '$f' >/dev/null" ;;
+    *.json)        if has jq; then run "json $f" "jq empty '$f'"
+                   elif has python3; then run "json $f" "python3 -m json.tool '$f' >/dev/null"
+                   else echo "WARN  json $f: skipped, no jq or python3"; fi ;;
   esac
   exit $failed
 fi
