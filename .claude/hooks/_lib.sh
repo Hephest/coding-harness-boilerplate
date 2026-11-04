@@ -167,7 +167,7 @@ approval_policy() {
 # directory that something lands in, where the branch and the contract judge the file, not the
 # directory. Returns 0 = allowed, 2 = blocked with the reason on stderr.
 path_policy() {
-  local file="$1" cwd="${2:-$PWD}" scope="${3:-}" dir root rel branch task zone g contract targets glob zprefix gprefix
+  local file="$1" cwd="${2:-$PWD}" scope="${3:-}" dir root rel branch task zone g contract targets glob zprefix gprefix under
   case "$file" in /*) ;; *) file="$cwd/$file" ;; esac
 
   # Canonical form, so a path through a symlink gets the same checks as the real one.
@@ -185,7 +185,9 @@ path_policy() {
   #     it, secrets included. Holds in maintainer mode, like .git itself.
   if [ -d "$file" ]; then
     root="$(repo_root "$cwd")"
-    if [ -e "$file/.git" ] || { [ -n "$root" ] && case "$root/" in "${file%/}"/*) true ;; *) false ;; esac; }; then
+    # Built first: on bash 5.2 a quoted expansion that strips to empty, right before /*, never matches.
+    under="${file%/}/"
+    if [ -e "$file/.git" ] || { [ -n "$root" ] && case "$root/" in "$under"*) true ;; *) false ;; esac; }; then
       echo "BLOCKED: '$file' holds a whole repository, .git included. Name the paths inside it instead." >&2; return 2
     fi
   fi
