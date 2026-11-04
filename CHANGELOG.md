@@ -35,8 +35,8 @@ as v0.2.0, which `0.x` allows when it is called out. See **Upgrading** below.
 - `scripts/harness-init.sh` copies the harness into a project and prints the next steps. It
   never overwrites a file.
 - Self-test cases for the Bash guard, contract approval, the reviewer limits and
-  `harness-init.sh`, in `tests/harness/cases-<topic>.sh`. The self-test now takes about 90
-  seconds, which is also how long the opt-in pre-commit hook waits.
+  `harness-init.sh`, in `tests/harness/cases-<topic>.sh`. The self-test now takes about two
+  minutes, which is also how long the opt-in pre-commit hook waits.
 
 ### Changed
 - The Bash guard peels `sudo`, `doas`, `setsid`, `stdbuf` and `ionice` as well as the older
@@ -129,7 +129,7 @@ From 0.1.x. The harness files are human-owned, so you apply these yourself.
 4. If you edited any of the files in step 1, or put your own rules in a file directly under
    `.claude/`, check them again: those files are now guarded, and `.env.example` can no longer be
    written by the agent.
-5. Run `tests/harness/run.sh`. It takes about 90 seconds.
+5. Run `tests/harness/run.sh`. It takes about two minutes.
 
 ## [0.1.0] - 2026-11-03
 

@@ -8,10 +8,10 @@ also a live test of the boilerplate.
 ```bash
 git clone https://github.com/Hephest/coding-harness-boilerplate && cd coding-harness-boilerplate
 git config core.hooksPath .githooks     # optional: run the self-test before every commit
-tests/harness/run.sh                    # about 90 seconds; should end with "0 failed"
+tests/harness/run.sh                    # about two minutes; should end with "0 failed"
 ```
 
-The pre-commit hook runs the same self-test, so every commit waits about 90 seconds.
+The pre-commit hook runs the same self-test, so every commit waits about two minutes.
 
 You need `bash`, `git`, and `jq` or `python3`. `shellcheck` is optional locally; CI always
 runs it.

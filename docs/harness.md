@@ -191,7 +191,7 @@ use maintainer mode in a normal project.
 ## The self-test
 
 `tests/harness/run.sh` checks the hooks against a throwaway git repo and ends with a pass/fail
-count. It takes about 90 seconds, so run it before you push rather than after every edit. Cases
+count. It takes about two minutes, so run it before you push rather than after every edit. Cases
 live in `tests/harness/cases-<topic>.sh`, which `run.sh` sources just before its summary line.
 
 ## Costs (team routing)
