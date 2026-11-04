@@ -487,7 +487,7 @@ guard 0 "gaps: write: new test"                    "$wt/tests/test_new.py"
 # --- Criterion 9: maintainer mode opens the harness items and nothing else ---
 while IFS= read -r row; do
   [ -n "$row" ] || continue
-  gb 0 "gaps: maintainer: allowed: $row" "$wt" "$row" "" maint
+  par_begin; gb 0 "gaps: maintainer: allowed: $row" "$wt" "$row" "" maint > "$PF" & par_end $!
 done <<'ROWS'
 mv .claude x
 mv .claude/hooks x
@@ -513,9 +513,10 @@ awk -i inplace 1 .claude/settings.json
 git config core.hooksPath .githooks
 git -c core.hooksPath=/tmp/x status
 ROWS
+par_flush
 while IFS= read -r row; do
   [ -n "$row" ] || continue
-  gb 2 "gaps: maintainer: never: $row" "$wt" "$row" "" maint
+  par_begin; gb 2 "gaps: maintainer: never: $row" "$wt" "$row" "" maint > "$PF" & par_end $!
 done <<'ROWS'
 mv .git x
 rm -rf .git
@@ -544,6 +545,7 @@ git show HEAD:.env
 git cat-file -p HEAD:.env
 git diff --no-index /dev/null .env
 ROWS
+par_flush
 
 # The reasons say what to do next
 gb 2 "gaps: message: harness parent"   "$wt" 'mv .claude x'          "harness infrastructure"

@@ -4,7 +4,9 @@
 rv_hook="$fx/.claude/hooks/guard-bash.sh"
 
 # rv <expected-exit> <name> <command> [agent_type] [HARNESS_ROLE] [text stderr must contain]
-rv() {
+# Rows run side by side, see par_begin in cases-guard-bash.sh; the lines come out in order.
+rv() { par_begin; rv_row "$@" > "$PF" & par_end $!; }
+rv_row() {
   local want="$1" name="$2" cmd="$3" agent="${4:-}" role="${5:-}" needle="${6:-}" extra="" err got
   [ -n "$agent" ] && extra=",\"agent_type\":\"$agent\""
   err="$( unset HARNESS_MAINTAINER HARNESS_ROLE
@@ -114,3 +116,4 @@ rv 2 "others: still guarded (git push)"       "git push" test-runner
 
 # The reviewer still can't read secrets through the allowed tools
 rv 2 "reviewer: grep of .env blocks"          "grep KEY .env" reviewer
+par_flush

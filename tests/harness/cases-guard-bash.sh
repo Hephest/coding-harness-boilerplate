@@ -6,9 +6,14 @@
 
 gb_hook="$fx/.claude/hooks/guard-bash.sh"
 gb_log="$fx/.agent/state/guard-bash.log"
+gb_fin="$aux/finish.json"   # the input file the must-finish cases hand to the hook
 
 # json_str <text> : a JSON string. Pure bash, so a row can't break out of its JSON whatever it holds.
 # For rows only: ${x//} is quadratic on bash 3.2, and 300KB takes minutes. See gb_big.
+# Bash 5.2 gives a backslash or & in a replacement a meaning (patsub_replacement), while bash 3.2
+# keeps the quotes of a quoted replacement. No spelling is right on both, so switch the feature off
+# (3.2 has no such option; the error is ignored) and keep the replacements bare.
+shopt -u patsub_replacement 2>/dev/null
 json_str() {
   local s="$1" q='"' b='\'
   s="${s//"$b"/$b$b}"
@@ -20,6 +25,32 @@ json_str() {
 bash_in() { # bash_in <cwd> <command>
   printf '{"tool_name":"Bash","cwd":%s,"tool_input":{"command":%s}}' "$(json_str "$1")" "$(json_str "$2")"
 }
+
+# --- Running rows side by side ---
+# Rows only read the fixture and the hook is a fresh process per row, so rows run PAR_MAX at a time.
+# Each job writes its PASS/FAIL lines to its own file. They are printed, and counted, in the order
+# the jobs were started, so the output is the same as a serial run and a failure still names its row.
+# One job per core, 16 at most: the big inputs have a 15 second limit, which a starved job would miss.
+PAR_MAX="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+case "$PAR_MAX" in ''|*[!0-9]*|0) PAR_MAX=2 ;; esac
+[ "$PAR_MAX" -gt 16 ] && PAR_MAX=16
+PAR_SEQ=0; PAR_HEAD=0; PAR_TAIL=0; PAR_PIDS=(); PAR_FILES=(); PF=""; PD=""
+par_reap() { # the oldest job: wait for it, then replay its lines
+  local line
+  wait "${PAR_PIDS[$PAR_HEAD]}" 2>/dev/null
+  while IFS= read -r line; do
+    case "$line" in "PASS  "*) pass=$((pass + 1)) ;; "FAIL  "*) fail=$((fail + 1)) ;; esac
+    printf '%s\n' "$line"
+  done < "${PAR_FILES[$PAR_HEAD]}"
+  PAR_HEAD=$((PAR_HEAD + 1))
+}
+par_begin() { # sets PF (the job's output file) and PD (a private dir name) once a slot is free
+  while [ $((PAR_TAIL - PAR_HEAD)) -ge "$PAR_MAX" ]; do par_reap; done
+  PAR_SEQ=$((PAR_SEQ + 1))
+  PF="$aux/par.$((PAR_SEQ % PAR_MAX))"; PD="$aux/mf.$PAR_SEQ"
+}
+par_end() { PAR_PIDS[$PAR_TAIL]="$1"; PAR_FILES[$PAR_TAIL]="$PF"; PAR_TAIL=$((PAR_TAIL + 1)); }
+par_flush() { while [ "$PAR_HEAD" -lt "$PAR_TAIL" ]; do par_reap; done; }
 
 gb_cwd() {
   case "$1" in wt) echo "$wt" ;; main) echo "$fx" ;; out) echo "$aux" ;; esac
@@ -54,13 +85,17 @@ gb_raw() {
   else ok "guard-bash: $name"; fi
 }
 
+gb_row() { gb "$1" "$2 [$3]: $4" "$(gb_cwd "$3")" "$(gb_expand "$4")"; }
 # gb_table <expected-exit> <label> : reads ROWS from stdin
 gb_table() {
   local want="$1" label="$2" where cmd
   while IFS=$'\t' read -r where cmd; do
     case "$where" in ''|\#*) continue ;; esac
-    gb "$want" "$label [$where]: $cmd" "$(gb_cwd "$where")" "$(gb_expand "$cmd")"
+    par_begin
+    gb_row "$want" "$label" "$where" "$cmd" > "$PF" &
+    par_end $!
   done
+  par_flush
 }
 
 # A command that holds every awkward character must survive the trip into the hook unchanged.
@@ -680,20 +715,30 @@ gb_finish() { # gb_finish <expected-exit> <name> <file holding the hook input> [
       kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
       bad "guard-bash: must-finish: $name (still running after ${limit}s)"; return
     fi
-    sleep 0.05
+    sleep 0.02
   done
   wait "$pid"; got=$?
   if [ "$got" = "$want" ]; then ok "guard-bash: must-finish: $name"
   else bad "guard-bash: must-finish: $name (want exit $want, got $got)"; fi
 }
-gb_file() { printf '%s' "$1" > "$aux/finish.json"; echo "$aux/finish.json"; }
+gb_file() { printf '%s' "$1" > "$gb_fin"; echo "$gb_fin"; }
+
+# These run side by side (see par_begin), each in a subshell with a private copy of the hook, so its
+# log and input file are its own. A case that reads the log can't see another case's lines.
+mf_setup() {
+  mkdir -p "$PD/.claude" "$PD/.agent/state" && cp -R "$fx/.claude/hooks" "$PD/.claude/hooks" || return 1
+  gb_hook="$PD/.claude/hooks/guard-bash.sh"; gb_log="$PD/.agent/state/guard-bash.log"; gb_fin="$PD/finish.json"
+}
 
 # Malformed: every way to stop in the middle of something. %BS% = a backslash at the very end.
-while IFS= read -r row; do
-  [ -n "$row" ] || continue
-  cmd="$(gb_expand "$row")"; cmd="${cmd//%BS%/\\}"
-  gb_finish 0 "malformed: $row" "$(gb_file "$(bash_in "$wt" "$cmd")")"
-done <<'ROWS'
+par_begin
+{ mf_setup
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    cmd="$(gb_expand "$row")"; cmd="${cmd//%BS%/\\}"
+    gb_finish 0 "malformed: $row" "$(gb_file "$(bash_in "$wt" "$cmd")")"
+  done
+} > "$PF" <<'ROWS' &
 %BS%
 echo %BS%
 echo "%BS%
@@ -763,93 +808,118 @@ dd
 bash -c
 eval
 ROWS
+par_end $!
 
 # rep <text> <doublings> : sets REP. Doubling, because ${x//} and per-item loops are far too slow.
 rep() { REP="$1"; local i=0; while [ "$i" -lt "$2" ]; do REP="$REP$REP"; i=$((i + 1)); done; }
 # Written as JSON by hand for the same reason. <text> needs no escaping, or arrives escaped.
-gb_big() { printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"%s"}}' "$wt" "$1" > "$aux/finish.json"; }
+gb_big() { printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"%s"}}' "$wt" "$1" > "$gb_fin"; }
 
 # Each one hung the hook, or came close, before the limits went in.
 over() { # over <name> : the last input ran out of budget. It passes and says so in the log.
   : > "$gb_log"
-  gb_finish 0 "$1" "$aux/finish.json"
+  gb_finish 0 "$1" "$gb_fin"
   if grep -q 'unlexable: over budget' "$gb_log"; then ok "guard-bash: must-finish: $1: logged"
   else bad "guard-bash: must-finish: $1: logged"; fi
 }
-rep "''" 19;           gb_big "$REP"; over "1MB of empty quotes"
-rep "x " 19;           gb_big "$REP"; over "1MB of short words"
-rep 'a$' 19;           gb_big "\\\"$REP\\\""; over "1MB of specials in double quotes"
-rep '`x` ' 17;         gb_big "$REP"; over "512KB of backticks"
-rep '# x\n' 18;        gb_big "$REP"; over "1MB of comment lines"
-rep '( ' 15;           gb_big "$REP"; over "32768 open parens"
-rep '(' 15;            gb_big "$REP"; gb_finish 0 "32768 parens in a row, read as arithmetic" "$aux/finish.json"
-rep '$(' 15;           gb_big "$REP"; over "32768 open substitutions"
-rep 'echo x > a; ' 12; gb_big "$REP"; over "4096 targets"
-rep 'x' 22;            gb_big "$REP"; over "4MB word"
-rep 'a' 22;            gb_big "cat -$REP"; over "4MB flag cluster"
-rep 'x\n' 21;          gb_big "cat <<-E\n$REP\tE"; over "tab heredoc, 2M lines"
-
-: > "$gb_log"
-rep 'x\n' 19;          gb_big "echo \\\"$REP"; gb_finish 0 "1MB unterminated, must log a short line" "$aux/finish.json"
-[ "$(wc -c < "$gb_log" | tr -d ' ')" -lt 400 ] && ok "guard-bash: must-finish: log line stays short" \
-  || bad "guard-bash: must-finish: log line stays short"
-rep 'cat $x; ' 15;     gb_big "$REP"; : > "$gb_log"; gb_finish 0 "32768 unresolved targets" "$aux/finish.json"
-[ "$(wc -l < "$gb_log" | tr -d ' ')" -le 51 ] && ok "guard-bash: must-finish: log lines are bounded" \
-  || bad "guard-bash: must-finish: log lines are bounded ($(wc -l < "$gb_log"))"
-rep '../' 12;          gb_big "cat ${REP}x"; : > "$gb_log"; gb_finish 0 "path past PATH_MAX" "$aux/finish.json"
-grep -q 'target too long' "$gb_log" && ok "guard-bash: must-finish: long path logged" \
-  || bad "guard-bash: must-finish: long path logged"
-rep 'y' 15;            gb_big "$REP a"; : > "$gb_log"; gb_finish 0 "32KB command name" "$aux/finish.json"
-grep -q 'word too long' "$gb_log" && ok "guard-bash: must-finish: long word logged" \
-  || bad "guard-bash: must-finish: long word logged"
-
-# A heredoc is the one big command that's normal: the whole of it has to be read, not given up on.
-line='print(\"some line of generated code, long enough to look like a real one\")\n'
-rep "$line" 12
-gb_big "cat > src/big.py <<'EOF'\n${REP}EOF"
-: > "$gb_log"; gb_finish 0 "4096-line heredoc" "$aux/finish.json"
-[ ! -s "$gb_log" ] && ok "guard-bash: must-finish: 4096-line heredoc read to the end" \
-  || bad "guard-bash: must-finish: 4096-line heredoc read to the end ($(cut -f2 "$gb_log"))"
-gb_big "cat > src/big.py <<'EOF'\n${REP}EOF\ngit push"
-gb_finish 2 "command after a big heredoc is seen" "$aux/finish.json"
-gb_big "cat > .env <<'EOF'\n${REP}EOF"
-gb_finish 2 "target of a big heredoc is seen" "$aux/finish.json"
-rep 'x\n' 21
-gb_big "cat <<'EOF'\n${REP}EOF\ngit push"
-gb_finish 2 "command after a 4MB heredoc of short lines" "$aux/finish.json"
-# The closing line can fall anywhere against the search window, so walk it across one boundary.
-for pad in 8180 8181 8182 8183 8184 8185 8186 8187 8188 8189 8190 8191 8192 8193; do
-  rep 'x' 13; body="${REP:0:$pad}"
-  gb_big "cat <<'EOF'\n$body\nEOF\ngit push"
-  gb_finish 2 "closing line at offset $pad" "$aux/finish.json"
-done
-# ...and the words and quoted strings that run past one
-rep 'x' 13
-gb_finish 2 "quote past the window" "$(gb_file "$(bash_in "$wt" "echo '${REP}y z'; git push")")"
-gb_finish 2 "double quote past the window" "$(gb_file "$(bash_in "$wt" "echo \"${REP}y z\"; git push")")"
-gb_finish 0 "comment past the window stays a comment" "$(gb_file "$(bash_in "$wt" "# ${REP}; git push")")"
-gb_finish 2 "command after a comment past the window" "$(gb_file "$(bash_in "$wt" "# ${REP}y z"$'\n'"git push")")"
-# One search can't be stopped by a budget, so one long string is the test of the window itself.
-rep 'x' 22
-gb_big "echo '$REP'"; gb_finish 0 "4MB single-quoted string" "$aux/finish.json"
-gb_big "echo \\\"$REP\\\""; gb_finish 0 "4MB double-quoted string" "$aux/finish.json"
+# mf_case <cmd...> : one case in the background, its own subshell and private hook copy.
+mf_case() { par_begin; ( mf_setup && "$@" ) > "$PF" & par_end $!; }
 
 # Forks are where the time goes when the lexer is fine. Each check here costs a second, so only
-# the clock can stop it. Slow on purpose: once per run, not again inside the git env leak replay.
+# the clock can stop it. Started first, because it outlasts everything else here. Slow on purpose: once per run, not again inside the git env leak replay.
 if [ -n "${HARNESS_SELFTEST_NESTED:-}" ]; then
   echo "SKIP  guard-bash: must-finish: slow git (already inside the replay)"
 else
   slowdir="$(tool_dir gb-slow cat dirname date "$gbreader")"
   printf '#!/bin/sh\nsleep 1\nexit 128\n' > "$slowdir/git"; chmod +x "$slowdir/git"
-  rep 'cat a; ' 8
-  bash_in "$wt" "$REP" > "$aux/finish.json"
-  : > "$gb_log"
-  ( PATH="$slowdir:$PATH"; gb_finish 0 "slow git stops at the deadline" "$aux/finish.json" 25 ) | sed 's/^/ /' > "$aux/slow.out"
-  if grep -q PASS "$aux/slow.out"; then ok "guard-bash: must-finish: slow git stops at the deadline"
-  else bad "guard-bash: must-finish: slow git stops at the deadline ($(cat "$aux/slow.out"))"; fi
-  grep -q 'unlexable: over budget' "$gb_log" && ok "guard-bash: must-finish: slow git logged" \
-    || bad "guard-bash: must-finish: slow git logged"
+  mf_slow() {
+    rep 'cat a; ' 8
+    bash_in "$wt" "$REP" > "$gb_fin"
+    : > "$gb_log"
+    ( PATH="$slowdir:$PATH"; gb_finish 0 "slow git stops at the deadline" "$gb_fin" 25 ) | sed 's/^/ /' > "$PD/slow.out"
+    if grep -q PASS "$PD/slow.out"; then ok "guard-bash: must-finish: slow git stops at the deadline"
+    else bad "guard-bash: must-finish: slow git stops at the deadline ($(cat "$PD/slow.out"))"; fi
+    grep -q 'unlexable: over budget' "$gb_log" && ok "guard-bash: must-finish: slow git logged" \
+      || bad "guard-bash: must-finish: slow git logged"
+  }
+  mf_case mf_slow
 fi
+
+mf_over() { rep "$1" "$2"; gb_big "${4:-}$REP${5:-}"; over "$3"; }
+mf_case mf_over "''" 19 "1MB of empty quotes"
+mf_case mf_over "x " 19 "1MB of short words"
+mf_case mf_over 'a$' 19 "1MB of specials in double quotes" '\"' '\"'
+mf_case mf_over '`x` ' 17 "512KB of backticks"
+mf_case mf_over '# x\n' 18 "1MB of comment lines"
+mf_case mf_over '( ' 15 "32768 open parens"
+mf_parens() { rep '(' 15; gb_big "$REP"; gb_finish 0 "32768 parens in a row, read as arithmetic" "$gb_fin"; }
+mf_case mf_parens
+mf_case mf_over '$(' 15 "32768 open substitutions"
+mf_case mf_over 'echo x > a; ' 12 "4096 targets"
+mf_case mf_over 'x' 22 "4MB word"
+mf_case mf_over 'a' 22 "4MB flag cluster" "cat -"
+mf_case mf_over 'x\n' 21 "tab heredoc, 2M lines" 'cat <<-E\n' '\tE'
+
+mf_logs() {
+  : > "$gb_log"
+  rep 'x\n' 19;          gb_big "echo \\\"$REP"; gb_finish 0 "1MB unterminated, must log a short line" "$gb_fin"
+  [ "$(wc -c < "$gb_log" | tr -d ' ')" -lt 400 ] && ok "guard-bash: must-finish: log line stays short" \
+    || bad "guard-bash: must-finish: log line stays short"
+  rep 'cat $x; ' 15;     gb_big "$REP"; : > "$gb_log"; gb_finish 0 "32768 unresolved targets" "$gb_fin"
+  [ "$(wc -l < "$gb_log" | tr -d ' ')" -le 51 ] && ok "guard-bash: must-finish: log lines are bounded" \
+    || bad "guard-bash: must-finish: log lines are bounded ($(wc -l < "$gb_log"))"
+  rep '../' 12;          gb_big "cat ${REP}x"; : > "$gb_log"; gb_finish 0 "path past PATH_MAX" "$gb_fin"
+  grep -q 'target too long' "$gb_log" && ok "guard-bash: must-finish: long path logged" \
+    || bad "guard-bash: must-finish: long path logged"
+  rep 'y' 15;            gb_big "$REP a"; : > "$gb_log"; gb_finish 0 "32KB command name" "$gb_fin"
+  grep -q 'word too long' "$gb_log" && ok "guard-bash: must-finish: long word logged" \
+    || bad "guard-bash: must-finish: long word logged"
+}
+mf_case mf_logs
+
+# A heredoc is the one big command that's normal: the whole of it has to be read, not given up on.
+mf_heredoc() {
+  local line='print(\"some line of generated code, long enough to look like a real one\")\n'
+  rep "$line" 12
+  gb_big "cat > src/big.py <<'EOF'\n${REP}EOF"
+  : > "$gb_log"; gb_finish 0 "4096-line heredoc" "$gb_fin"
+  [ ! -s "$gb_log" ] && ok "guard-bash: must-finish: 4096-line heredoc read to the end" \
+    || bad "guard-bash: must-finish: 4096-line heredoc read to the end ($(cut -f2 "$gb_log"))"
+  gb_big "cat > src/big.py <<'EOF'\n${REP}EOF\ngit push"
+  gb_finish 2 "command after a big heredoc is seen" "$gb_fin"
+  gb_big "cat > .env <<'EOF'\n${REP}EOF"
+  gb_finish 2 "target of a big heredoc is seen" "$gb_fin"
+}
+mf_case mf_heredoc
+mf_heredoc4() {
+  rep 'x\n' 21
+  gb_big "cat <<'EOF'\n${REP}EOF\ngit push"
+  gb_finish 2 "command after a 4MB heredoc of short lines" "$gb_fin"
+}
+mf_case mf_heredoc4
+# The closing line can fall anywhere against the search window, so walk it across one boundary.
+mf_window() {
+  local pad body
+  for pad in 8180 8181 8182 8183 8184 8185 8186 8187 8188 8189 8190 8191 8192 8193; do
+    rep 'x' 13; body="${REP:0:$pad}"
+    gb_big "cat <<'EOF'\n$body\nEOF\ngit push"
+    gb_finish 2 "closing line at offset $pad" "$gb_fin"
+  done
+  # ...and the words and quoted strings that run past one
+  rep 'x' 13
+  gb_finish 2 "quote past the window" "$(gb_file "$(bash_in "$wt" "echo '${REP}y z'; git push")")"
+  gb_finish 2 "double quote past the window" "$(gb_file "$(bash_in "$wt" "echo \"${REP}y z\"; git push")")"
+  gb_finish 0 "comment past the window stays a comment" "$(gb_file "$(bash_in "$wt" "# ${REP}; git push")")"
+  gb_finish 2 "command after a comment past the window" "$(gb_file "$(bash_in "$wt" "# ${REP}y z"$'\n'"git push")")"
+}
+mf_case mf_window
+# One search can't be stopped by a budget, so one long string is the test of the window itself.
+mf_str1() { rep 'x' 22; gb_big "echo '$REP'"; gb_finish 0 "4MB single-quoted string" "$gb_fin"; }
+mf_str2() { rep 'x' 22; gb_big "echo \\\"$REP\\\""; gb_finish 0 "4MB double-quoted string" "$gb_fin"; }
+mf_case mf_str1
+mf_case mf_str2
+
+par_flush
 
 # Wired into settings.json, with a timeout of its own
 hook_setting() { # hook_setting <field>: matcher or timeout of the guard-bash entry
