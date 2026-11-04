@@ -169,12 +169,14 @@ cat > "$wt/.agent/contracts/demo.md" <<'EOF'
 1. x
 EOF
 echo demo > "$wt/.agent/state/active-task"
+( cd "$wt" && "$ROOT/scripts/contract-approve.sh" demo ) >/dev/null
 guard 0 "contract scope: target"        "$wt/src/app.py"
 guard 2 "contract scope: outside"       "$wt/src/other.py"
 guard 0 "danger zone named in contract" "$wt/src/billing/pay.py"
 guard 0 "symlinked root: contract target"  "$aux/linked/src/app.py"
 guard 2 "symlinked root: contract outside" "$aux/linked/src/other.py"
 printf '# Contract: demo\n## Target files\n- src/*\n' > "$wt/.agent/contracts/demo.md"
+( cd "$wt" && "$ROOT/scripts/contract-approve.sh" demo ) >/dev/null
 guard 2 "danger zone needs specific glob" "$wt/src/billing/pay.py"
 echo ghost > "$wt/.agent/state/active-task"
 guard 2 "active task without contract"  "$wt/src/app.py"
