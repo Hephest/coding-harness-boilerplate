@@ -23,9 +23,11 @@ as v0.2.0, which `0.x` allows when it is called out. See **Upgrading** below.
   Until you approve it, and after any edit to it, the guard blocks work on that task. The guard
   and `settings.json` refuse the agent the known ways of running the script. That is best
   effort: see [SECURITY.md](SECURITY.md), limitation 12.
-- One task id. On a `task/<id>` branch with a contract or an approval record, `<id>` alone sets
-  the approval check, the scope check and the Stop gate's receipt check, and
-  `.agent/state/active-task` is ignored there. Elsewhere `active-task` decides, and its contract
+- One task id. A `task/<id>` branch always has task id `<id>`, and `.agent/state/active-task` is
+  ignored there. Writes outside `.agent/` need that contract approved, even if the contract file
+  is missing. An id `scripts/contract-approve.sh` would refuse (a slash, `+`, `@`, a leading `-`)
+  blocks with a message saying so. The Stop gate skips the receipt check on a task branch with
+  neither a contract nor an approval record. Elsewhere `active-task` decides, and its contract
   has to be approved.
 - The reviewer agent is limited to `scripts/verify.sh` and `git diff|log|show|status`, piped into
   `head`, `tail`, `grep` or `wc`. Anything else is blocked, and a command the guard can't check
@@ -38,12 +40,13 @@ as v0.2.0, which `0.x` allows when it is called out. See **Upgrading** below.
 
 ### Changed
 - The Bash guard peels `sudo`, `doas`, `setsid`, `stdbuf` and `ionice` as well as the older
-  wrappers, reads `$'...'` and `$"..."` literals as the text they stand for, and takes
+  wrappers, treats `{a..b}` brace words like `{a,b}` (unresolved, logged), reads `$'...'` and `$"..."` literals as the text they stand for, and takes
   `--target-directory DIR` with a space. A relative target after a `cd` it can't resolve is judged
   from the last known directory, so `cd - && cat .env` blocks.
 - The blocked `git config` keys are the wider list: `core` (whole section), `core.hooksPath`,
   `core.fsmonitor`, `core.sshCommand`, `core.pager`, `core.editor`, `alias.*`, `include.path`,
-  `includeIf.*`, `diff.external`, `sequence.editor`, `filter.*`, `credential.*` and `gpg.*`.
+  `includeIf.*`, `diff.external`, `diff.<name>.*`, `merge.<name>.*`, `difftool.*`,
+  `mergetool.*`, `pager.*`, `sequence.editor`, `filter.*`, `credential.*` and `gpg.*`.
   The check is skipped in maintainer mode.
 - `scripts/harness-init.sh` warns loudly when it keeps an existing `.claude/settings.json` that
   lacks the guards.
@@ -84,10 +87,12 @@ as v0.2.0, which `0.x` allows when it is called out. See **Upgrading** below.
   `_lib.sh` elsewhere, or writes the approval record with a tool the guard doesn't know, gets
   past it.
 - `git config` keys that run code or skip hooks (see Changed for the list) are blocked.
-- Known limits, listed in [SECURITY.md](SECURITY.md): renaming a task branch drops its
-  enforcement, `grep -r` can read a secret by recursion, `git log -p`, `git blame` and
-  `git archive` aren't checked as readers, and `git am`, `cherry-pick`, `revert`, `rebase`,
-  `pull` and `apply` can land changes in harness files.
+- Known limits, listed in [SECURITY.md](SECURITY.md): moving to another branch leaves a task's
+  enforcement behind, `bash -c "$(cat ...)"`, `env -S` and `find -exec` can reach the approval
+  script, `grep -r` can read a secret by recursion, `git log -p`, `git blame` and
+  `git archive` aren't checked as readers, and `git am`, `cherry-pick`, `revert`, `rebase`
+  and `pull` can land changes in harness files, as can `git apply` with a patch on stdin (a patch
+  file is checked).
 - `CLAUDE.md` and `.claude/rules/` can't be edited by the agent.
 
 ### Upgrading
@@ -116,7 +121,9 @@ From 0.1.x. The harness files are human-owned, so you apply these yourself.
      `Bash(./scripts/contract-approve.sh:*)`.
 3. For every task already in progress, review its contract and run
    `scripts/contract-approve.sh <task-id>` from the checkout that holds it. Without that, edits
-   on its branch block with "the contract isn't approved". From now on, run it for each new
+   on its branch block with "the contract isn't approved". A `task/*` branch you made by hand
+   blocks too, until it has a contract and that contract is approved: run `/task` for it, or
+   write the contract and approve it, and don't rename the branch to get around it. From now on, run it for each new
    contract after the agent writes it, and again after any edit to it. In Claude Code, use
    `! scripts/contract-approve.sh <task-id>`; if that is refused, use a plain terminal.
 4. If you edited any of the files in step 1, or put your own rules in a file directly under

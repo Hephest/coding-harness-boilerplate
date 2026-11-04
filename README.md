@@ -193,7 +193,7 @@ stop goes through, so a stuck task doesn't burn tokens.
 | Concept | In one paragraph |
 |---|---|
 | **Contract** | `.agent/contracts/<id>.md`: the goal, **at most 5 target files** (globs allowed), acceptance criteria that map to tests, what's out of scope, and an attempt ceiling. If a task needs more than 5 files, split it. The guard only allows writes to the listed files. |
-| **Approval** | You run `scripts/contract-approve.sh <id>`, which stores a hash of the contract under the git common dir. The guard blocks work on a task whose contract has no approval or has changed since. The guard and `settings.json` refuse the agent the usual ways of running the script, and it can still edit the contract (`.agent/` stays writable) but must ask you to approve again. On a `task/<id>` branch the id in the branch name decides which contract is approved and enforced; `.agent/state/active-task` is ignored there. |
+| **Approval** | You run `scripts/contract-approve.sh <id>`, which stores a hash of the contract under the git common dir. The guard blocks work on a task whose contract has no approval or has changed since. The guard and `settings.json` refuse the agent the usual ways of running the script, and it can still edit the contract (`.agent/` stays writable) but must ask you to approve again. On a `task/<id>` branch the id in the branch name decides which contract has to be approved and is enforced, even when the contract file is missing; `.agent/state/active-task` is ignored there. |
 | **Worktree** | Each task gets its own checkout on a `task/<id>` branch under `.worktrees/`. `main` stays clean, and you can throw a failed attempt away with one command. |
 | **Guard** | PreToolUse hooks that run before every Edit/Write/NotebookEdit and every Bash command. Exit 2 blocks it and tells Claude why. |
 | **Sensors** | Tools that measure "done": the fast check per edit, and the full `verify.sh` at the Stop gate. |
@@ -242,9 +242,10 @@ What v0.2 enforces:
 - **Approval.** A human approves the contract with `scripts/contract-approve.sh`. The guard and
   `settings.json` refuse the agent the known ways of running it (best effort, see below), and a
   changed contract blocks all work until you approve it again.
-- **One task id.** On a `task/<id>` branch with a contract or an approval record, `<id>` alone
-  sets approval, scope and the Stop gate's receipt check. Elsewhere `.agent/state/active-task`
-  decides, and its contract has to be approved.
+- **One task id.** A `task/<id>` branch always has task id `<id>`. Writes outside `.agent/` need
+  that contract approved, even if the contract file is missing, so a hand-made `task/*` branch
+  blocks until you run `/task`. Elsewhere `.agent/state/active-task` decides, and its contract
+  has to be approved.
 - **Secrets.** `settings.json` denies the Read tool on `.env*`, `secrets/`, `*.pem` and `*.key`,
   and the Bash guard blocks shell reads of the same paths in the commands it knows.
 - **Behaviour-shaping files.** The root `CLAUDE.md` and `.claude/rules/` are harness files now,
@@ -262,10 +263,12 @@ Known gaps in v0.2:
   also best effort: an agent that copies the script and `_lib.sh` elsewhere, or writes the
   approval record with a tool the guard doesn't know, gets past it.
 - Work on a branch that isn't named `task/<id>`, with no active task, is judged only by the
-  generic rules. Renaming a task branch (`git branch -m`) drops that task's enforcement.
+  generic rules. Moving to another branch (`git branch -m`, `git switch`) leaves a task's
+  enforcement behind.
 - `grep -r` can read a secret by recursion, because only named paths are checked. `git log -p`,
   `git blame` and `git archive` aren't checked as readers. `git am`, `cherry-pick`, `revert`,
-  `rebase` and `pull` can land changes in harness files.
+  `rebase` and `pull` can land changes in harness files, and so can `git apply` with a patch on
+  stdin (a patch file is checked).
 - Not everything is guarded. `.agent/` stays writable on purpose (contracts, receipts and
   `.agent/lessons.md`, which `/finish` appends to), and so does a module's own `CLAUDE.md`.
 - Reading a secret through an interpreter, or any program the guard doesn't know, isn't blocked.

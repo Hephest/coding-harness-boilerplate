@@ -23,7 +23,7 @@ what it can't resolve (see Known limitations).
 | Claude editing `.git` internals, or writing to a whole repository at once: `git restore .`, `find . -delete`, a bare `tar -x` or `unzip` at the repo root all block | |
 | Claude widening its own scope by editing a contract: work on a task needs a contract that a human approved (`scripts/contract-approve.sh <id>`), and an edit to it voids the approval | |
 | Claude approving a contract itself, by the known routes: the guard and `settings.json` refuse `contract-approve.sh` run directly, through `sh` or `bash`, by a glob that matches it, or fed to `bash -s` on stdin, also in maintainer mode. **Best effort only**: see limitation 12 | An agent that copies the script and `_lib.sh` elsewhere, or writes the approval record with a tool the guard doesn't know |
-| `git push`, `git reset` and `git add -f` in any flag position (`git add -A -f`, `--force`, a shortened `--forc`): blocked by the Bash guard, and by `settings.json` deny rules for the plain forms. Also `git config` keys that run code or skip hooks, by the Bash guard only and not in maintainer mode: `core` (as a whole section), `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`, `core.editor`, `alias.*`, `include.path`, `includeIf.*`, `diff.external`, `sequence.editor`, `filter.*`, `credential.*` and `gpg.*` | |
+| `git push`, `git reset` and `git add -f` in any flag position (`git add -A -f`, `--force`, a shortened `--forc`): blocked by the Bash guard, and by `settings.json` deny rules for the plain forms. Also `git config` keys that run code or skip hooks, by the Bash guard only and not in maintainer mode: `core` (as a whole section), `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`, `core.editor`, `alias.*`, `include.path`, `includeIf.*`, `diff.external`, `diff.<name>.*`, `merge.<name>.*`, `difftool.*`, `mergetool.*`, `pager.*`, `sequence.editor`, `filter.*`, `credential.*` and `gpg.*` | |
 | `rm`, `curl` and `wget`: blocked by `settings.json` deny rules alone. The Bash guard doesn't block them (it does check what `rm` would delete against the write policy), so they depend on Claude Code applying the deny rules | |
 | The reviewer agent doing anything but `scripts/verify.sh` and `git diff|log|show|status`, piped into `head`, `tail`, `grep` or `wc`. Anything it can't check blocks | |
 | A write or command going through unchecked because the hook input can't be parsed, or because `git` is missing or failing (both guards fail closed) | |
@@ -32,7 +32,7 @@ what it can't resolve (see Known limitations).
 ## Known limitations (v0.2)
 
 1. **The Bash guard inspects known commands only.** Interpreter one-liners (`python -c`,
-   `node -e`), `find -exec sh -c` with placeholders, targets held in variables or globs, and
+   `node -e`), `find -exec sh -c` with placeholders, targets held in variables, globs or brace expansion (`{a,b}`, `{1..3}`), and
    anything else it can't resolve pass, and are logged to `.agent/state/guard-bash.log`. A shell
    string inside a shell string is looked at one level deep. After a `cd` it can't resolve, a
    relative target is judged from the last known directory, which may not be where the command
@@ -43,12 +43,16 @@ what it can't resolve (see Known limitations).
 3. **Some git commands aren't blocked.** `git commit --no-verify`, `git update-ref`,
    `git stash`, `git clean` and `git merge` pass. Review what lands on your branch. See
    limitation 14 for the commands that can bring in changes to harness files.
-4. **One task id, and none without a task.** On a `task/<id>` branch that has a contract or an
-   approval record for `<id>`, that id alone decides the approval check, the scope check and the
-   Stop gate's receipt check. `.agent/state/active-task` is ignored there, because the agent can
-   rewrite it. On any other branch, and on a task branch with neither a contract nor a record,
-   `active-task` decides, and its contract has to be approved too. With neither a task branch nor
-   an active task, only the protected paths, the harness files and the `main` rule apply.
+4. **One task id, and none off a task branch.** A branch named `task/<id>` always has task id
+   `<id>`, and `.agent/state/active-task` is ignored there, because the agent can rewrite it. A
+   write outside `.agent/` on that branch needs `.agent/contracts/<id>.md` to exist and be
+   approved, so a hand-made `task/*` branch blocks until `/task` has been run for it. An id that
+   `scripts/contract-approve.sh` would refuse (a slash, as in `task/fix/login`, or `+`, `@`, a
+   leading `-` or `.`) blocks with a message saying so, because it can never be approved. The Stop
+   gate skips the receipt check on a task branch with neither a contract nor an approval record.
+   On any other branch `active-task` decides, and its contract has to be approved too. With
+   neither a task branch nor an active task, only the protected paths, the harness files and the
+   `main` rule apply. The limit: moving to another branch leaves all of this behind (limitation 13).
 5. **Approval depends on `!` commands, which Claude Code doesn't document.** It isn't stated
    whether `!` commands are subject to deny rules. The deny on `contract-approve.sh` in
    `settings.json` may refuse your own `! scripts/contract-approve.sh <id>`. If it does, run it
@@ -82,12 +86,22 @@ what it can't resolve (see Known limitations).
     with a path it can't resolve (`$(git rev-parse --git-common-dir)/...` passes). The approval is
     a guardrail for a cooperative agent: it makes an unseen contract change visible, and it isn't
     proof that a human looked. Read the diff of a contract before you rely on it.
-13. **Renaming a task branch drops its enforcement.** `git branch -m` and `-M` pass the guard.
-    Once the branch isn't called `task/<id>`, the task id comes from `active-task` again, and with
-    none set the approval and scope checks stop applying (limitation 4).
+
+    Other routes to the script also pass, by decision: `bash -c "$(cat scripts/contract-approve.sh)"`,
+    `bash <(cat scripts/contract-approve.sh)`, `env -S`, and `find -exec` running it. `\u` escapes
+    inside `$'...'` stay unresolved, and so does brace expansion. Only a deliberately evasive agent
+    types these, and one that can run an interpreter could forge the record anyway. All of them are
+    logged to `.agent/state/guard-bash.log` when the guard can't resolve them.
+13. **Leaving a task branch drops its enforcement.** `git branch -m`, `-M`, `git switch` and
+    `git checkout` to another branch pass the guard. Once the branch isn't called `task/<id>`, the
+    task id comes from `active-task` again, and with none set the approval and scope checks stop
+    applying (limitation 4). The `main` rule and the protected paths still hold.
 14. **Some commands can land changes in harness files.** `git am`, `git cherry-pick`, `git revert`,
-    `git rebase`, `git pull` and `git apply` pass the guard whatever they write, because it doesn't
-    look inside a patch or a commit. Named-path forms such as `git checkout <rev> -- <file>` and
+    `git rebase` and `git pull` pass the guard whatever they write, because it doesn't look inside a
+    commit. `git apply` is checked when it names a patch file it can read: the targets inside the
+    patch go through the write policy, and `git apply evil.patch` blocks. A patch on stdin
+    (`cat x | git apply`) passes, and so do `--check` and `--stat`, which write nothing.
+    Named-path forms such as `git checkout <rev> -- <file>` and
     `git restore --source` are checked. Review the diff after any of them.
 15. **Readers are checked by named path only.** `grep -r` and `rg` on a directory (`grep -r KEY .`)
     can read a secret by recursion, and a glob such as `grep KEY .env*` is unresolved. `git log -p`,
@@ -99,9 +113,10 @@ what it can't resolve (see Known limitations).
 
 These go further than the 0.1 contracts, so they can surprise you:
 
-- **One task id.** On a `task/<id>` branch with a contract or an approval record, `<id>` alone
-  sets the approval, the scope and the Stop gate's receipt check; `active-task` is ignored there.
-  Elsewhere `active-task` decides, and its contract has to be approved.
+- **One task id.** A `task/<id>` branch always has task id `<id>`, and `active-task` is ignored
+  there. Writes outside `.agent/` need that contract approved, even when the contract file is
+  missing, so a hand-made `task/*` branch blocks until `/task` has been run. Elsewhere
+  `active-task` decides, and its contract has to be approved.
 - **Everything directly under `.claude/` is a harness file**, not only the listed ones. Its
   subdirectories are not, except `hooks`, `agents`, `skills`, `commands` and `rules`.
 - **Repo roots are protected.** A write that takes a whole repository (`git restore .`,

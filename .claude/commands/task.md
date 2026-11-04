@@ -18,7 +18,10 @@ Start task `$ARGUMENTS`.
    checkout before the worktree exists and covers every worktree. Then stop and wait until I say
    it's done.
 6. After I confirm the approval:
-   - `git worktree add -b task/<task-id> .worktrees/<task-id> HEAD`
+   - `git worktree add -b task/<task-id> .worktrees/<task-id> HEAD`, unless `task/<task-id>`
+     already exists (the guard says so when it blocks a hand-made task branch): then skip this
+     step, and add the worktree for the existing branch with
+     `git worktree add .worktrees/<task-id> task/<task-id>` if it has none
    - write `<task-id>` to `.worktrees/<task-id>/.agent/state/active-task`
    - copy the contract into the worktree's `.agent/contracts/` with `cp`, unchanged: a changed
      byte voids the approval

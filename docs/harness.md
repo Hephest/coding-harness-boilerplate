@@ -78,7 +78,7 @@ sentence in a prompt.
 | Hook | Event | Blocks when | Exit codes |
 |---|---|---|---|
 | `guard-write.sh` | PreToolUse on Edit/Write/MultiEdit/NotebookEdit | hook input it can't parse; git missing or failing; secrets or `.git` internals; a whole repository; local permission file; harness files (unless maintainer mode); edits on `main`, `master` or a detached HEAD; a contract that isn't approved; files outside the contract of the task; danger zones not named in the contract | 2 = blocked (reason goes to Claude), 0 = allowed |
-| `guard-bash.sh` | PreToolUse on Bash (timeout 30 s) | the same write policy for the targets of known shell commands and redirects; known commands reading secrets; `contract-approve.sh`; `git push`, `git reset`, `git add -f` in any position and `git config` keys that run code or skip hooks (not in maintainer mode); for the reviewer role, anything off its allowlist | 2 = blocked, 0 = allowed. What it can't resolve passes and is logged to `.agent/state/guard-bash.log` |
+| `guard-bash.sh` | PreToolUse on Bash (timeout 30 s) | the same write policy for the targets of known shell commands and redirects; known commands reading secrets; `contract-approve.sh`; `git push`, `git reset`, `git add -f` in any position and `git config` keys that run code or skip hooks, such as `core.hooksPath`, `alias.*`, `filter.*`, `diff.<name>.*`, `merge.<name>.*`, `pager.*` and `credential.*` (not in maintainer mode; the full list is in `git_config_key` in `guard-bash.sh`); for the reviewer role, anything off its allowlist | 2 = blocked, 0 = allowed. What it can't resolve passes and is logged to `.agent/state/guard-bash.log` |
 | `post-edit-check.sh` | PostToolUse on Edit/Write/MultiEdit/NotebookEdit | `verify.sh --fast <file>` fails (format, lint, syntax of that one file) | 2 = error sent back to Claude to fix now |
 | `stop-gate.sh` | Stop | branch has changes and `verify.sh` fails; or `verify.sh` passes and the task has no receipt | 2 = "keep working", at most 3 stops in a row; 0 = allowed |
 
@@ -116,20 +116,24 @@ policy resolves symlinks first, then checks the real path:
 **Which task a write belongs to.** One id drives the approval check, the scope check and the Stop
 gate's receipt check (`effective_task` in `_lib.sh`):
 
-- On a `task/<id>` branch that has a contract or an approval record for `<id>`, `<id>` is the
-  task. `.agent/state/active-task` is ignored there, because the agent can rewrite that file.
-- On any other branch, and on a task branch with neither, `.agent/state/active-task` names the
-  task, and its contract has to be approved too.
+- On a `task/<id>` branch, `<id>` is always the task, and `.agent/state/active-task` is ignored,
+  because the agent can rewrite that file. Writes outside `.agent/` need `.agent/contracts/<id>.md`
+  to exist and be approved, so a hand-made `task/*` branch blocks until `/task` has been run for
+  it. An id that `contract-approve.sh` would refuse (`task/fix/login`, or one with `+`, `@` or a
+  leading `-`) blocks with a message saying so. The Stop gate skips the receipt check on a task
+  branch with neither a contract nor an approval record.
+- On any other branch, `.agent/state/active-task` names the task, and its contract has to be
+  approved too.
 - With neither, there is no task: only the protected paths, the harness files and the `main`
-  rule apply. Renaming a task branch (`git branch -m`) puts you here, and the guard doesn't stop
-  it.
+  rule apply. Moving to another branch (`git branch -m`, `git switch`) puts you here, and the
+  guard doesn't stop it.
 
 The Bash guard also peels `sudo`, `doas`, `setsid`, `stdbuf`, `ionice`, `env`, `nice`, `timeout`,
 `xargs` and similar wrappers, reads `$'...'` and `$"..."` literals as the text they stand for, and
 takes `--target-directory DIR` as well as `--target-directory=DIR`. After a `cd` it can't resolve
 (`cd -`, `cd $X`), relative targets are judged from the last known directory, so `cd - && cat .env`
 blocks. Readers are checked by named path only: `grep -r KEY .` and `git log -p -- .env` pass, and
-`git am`, `cherry-pick`, `revert`, `rebase` and `pull` aren't looked into.
+`git am`, `cherry-pick`, `revert`, `rebase` and `pull` aren't looked into. `git apply` is: a patch file it can read has its targets checked, a patch on stdin isn't.
 
 Both guards fail closed: hook input they can't parse (malformed, or no `jq` and no working
 `python3`) blocks, and so does `git` missing or failing, because then a path can't be placed in
