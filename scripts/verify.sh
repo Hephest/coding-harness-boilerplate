@@ -22,6 +22,11 @@ FORMAT_ON_EDIT=1     # 1 = format each edited file (ruff format / prettier / gof
 # ----------------------------------------
 
 has() { command -v "$1" >/dev/null 2>&1; }
+# pytest only when real Python tests exist. tests/harness holds our shell self-test, not a project's
+# tests: counting it made a new Python project fail with "no tests ran" instead of exiting 78.
+has_py_tests() {
+  [ -d tests ] && find tests -path tests/harness -prune -o -type f \( -name 'test_*.py' -o -name '*_test.py' \) -print 2>/dev/null | grep -q .
+}
 detect() {
   if [ -f package.json ]; then
     [ -z "$TYPECHECK_CMD" ] && [ -f tsconfig.json ] && TYPECHECK_CMD="npx --no-install tsc --noEmit"
@@ -31,7 +36,7 @@ detect() {
   if [ -f pyproject.toml ] || [ -f setup.cfg ] || [ -f requirements.txt ]; then
     [ -z "$TYPECHECK_CMD" ] && has pyright && TYPECHECK_CMD="pyright"
     [ -z "$LINT_CMD" ] && has ruff && LINT_CMD="ruff check ."
-    [ -z "$TEST_CMD" ] && has pytest && [ -d tests ] && TEST_CMD="pytest -q"
+    [ -z "$TEST_CMD" ] && has pytest && has_py_tests && TEST_CMD="pytest -q"
   fi
 }
 

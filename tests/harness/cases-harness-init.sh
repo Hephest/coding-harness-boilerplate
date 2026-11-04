@@ -86,3 +86,38 @@ if [ -x "$t/scripts/verify.sh" ] && [ -x "$t/.claude/hooks/guard-write.sh" ] && 
 if [ "$r1" = 1 ] && [ "$r2" = 1 ] && [ "$r3" = 1 ] && [ ! -e "$fake/new-dir" ] && [ ! -e "$fake/.claude/.claude" ] && [ "$r4" = 2 ] && [ "$r5" = 2 ] \
    && ! grep -v '^ *#' "$hi" | grep -qE '\b(curl|wget|git clone|ssh)\b'; then
   ok "harness-init: refuses"; else bad "harness-init: refuses (rc $r1 $r2 $r3 $r4 $r5)"; fi
+
+# settings merge: a kept .claude/settings.json means no hooks and no deny rules. Exit stays 0 and the
+# file stays as it was, but the warning has to be loud, and it has to be the first next step.
+t="$(hi_new)"; mkdir -p "$t/.claude"; printf '{"mine":true}\n' > "$t/.claude/settings.json"
+out="$("$hi" "$t" 2>&1)"; rc=$?
+nxt="${out#*Next steps}"
+if [ "$rc" = 0 ] && [ "$(cat "$t/.claude/settings.json")" = '{"mine":true}' ] \
+   && [[ "$out" == *"WARNING: "*"settings.json already exists and was NOT changed"* ]] && [[ "$out" == *"GUARDS ARE OFF"* ]] \
+   && [[ "$nxt" == *"0. WARNING"* ]] && [[ "$nxt" == *"merge the hooks and deny rules"* ]]; then
+  ok "harness-init: settings merge: kept settings.json is warned about"; else bad "harness-init: settings merge: kept settings.json is warned about (rc=$rc: $out)"; fi
+# Not a false alarm: a copy identical to ours (a re-run), or one that already has the hooks and deny rules.
+t="$(hi_new)"; "$hi" "$t" >/dev/null 2>&1; out="$("$hi" "$t" 2>&1)"
+if [[ "$out" != *WARNING* ]]; then ok "harness-init: settings merge: no warning on a re-run"; else bad "harness-init: settings merge: no warning on a re-run"; fi
+t="$(hi_new)"; mkdir -p "$t/.claude"
+printf '{"x":1,"hooks":{"PreToolUse":[{"hooks":[{"command":".claude/hooks/guard-bash.sh"}]}]},"permissions":{"deny":["Bash(rm *)"]}}\n' > "$t/.claude/settings.json"
+out="$("$hi" "$t" 2>&1)"
+if [[ "$out" != *WARNING* ]]; then ok "harness-init: settings merge: no warning once merged"; else bad "harness-init: settings merge: no warning once merged"; fi
+
+# sensors for Python: tests/harness alone is not a test suite, and --dry-run says what a real run says.
+pyb="$(hi_new)"; printf '#!/bin/sh\nexit 0\n' > "$pyb/pytest"; chmod +x "$pyb/pytest"
+hi_sensors() { # hi_sensors <target> [--dry-run] : the sensors block only
+  local o; o="$(PATH="$pyb:$PATH" "$hi" ${2:+"$2"} "$1" 2>&1)"; o="${o#*sensors}"; printf '%s' "${o%%harness-init:*}"; }
+t="$(hi_new)"; : > "$t/pyproject.toml"
+real="$(hi_sensors "$t")"
+t2="$(hi_new)"; : > "$t2/pyproject.toml"
+dry="$(hi_sensors "$t2" --dry-run)"
+if [[ "$real" != *pytest* ]] && [[ "$dry" != *pytest* ]]; then ok "harness-init: sensors (python, no tests): no pytest from tests/harness"
+else bad "harness-init: sensors (python, no tests): no pytest from tests/harness (real: $real dry: $dry)"; fi
+[ "$real" = "$dry" ] && ok "harness-init: sensors (python, no tests): dry run agrees" || bad "harness-init: sensors (python, no tests): dry run agrees"
+for tf in tests/test_a.py tests/unit/b_test.py; do
+  t="$(hi_new)"; : > "$t/pyproject.toml"; mkdir -p "$t/$(dirname "$tf")"; : > "$t/$tf"
+  real="$(hi_sensors "$t")"; dry="$(hi_sensors "$t" --dry-run)"
+  if [[ "$real" == *"test: pytest"* ]] && [[ "$dry" == *"test: pytest"* ]]; then ok "harness-init: sensors (python, $tf): pytest, dry run agrees"
+  else bad "harness-init: sensors (python, $tf): pytest, dry run agrees (real: $real dry: $dry)"; fi
+done

@@ -45,7 +45,7 @@ esac
 
 [ -e "$dest" ] && [ ! -d "$dest" ] && { echo "harness-init: target is not a directory: $dest" >&2; exit 1; }
 
-copied=0; skipped=0
+copied=0; skipped=0; settings_skipped=0
 say() { if [ "$dry" = 1 ]; then echo "would $1"; else echo "$1"; fi; }
 
 # Task history and run state belong to the boilerplate's maintainers, not to a new project.
@@ -61,7 +61,13 @@ want() {
 copy_one() { # copy_one <relative path>
   local rel="$1"
   if [ -e "$dest/$rel" ] || [ -L "$dest/$rel" ]; then
-    echo "skip   $rel (already exists)"; skipped=$((skipped + 1)); return
+    echo "skip   $rel (already exists)"; skipped=$((skipped + 1))
+    # The hooks and deny rules live in this one file, so a kept copy that lacks them means no guards.
+    if [ "$rel" = .claude/settings.json ] && ! cmp -s "$SRC/$rel" "$dest/$rel" \
+       && ! { grep -q 'guard-bash.sh' "$dest/$rel" 2>/dev/null && grep -q '"deny"' "$dest/$rel" 2>/dev/null; }; then
+      settings_skipped=1
+    fi
+    return
   fi
   if [ "$dry" != 1 ]; then
     mkdir -p "$dest/$(dirname "$rel")" && cp -p "$SRC/$rel" "$dest/$rel" || { echo "harness-init: copy failed: $rel" >&2; exit 1; }
@@ -140,6 +146,12 @@ fi
 
 # Sensors: the same checks verify.sh auto-detects, read from the target. verify.sh is not edited.
 has() { command -v "$1" >/dev/null 2>&1; }
+# Real Python tests only. tests/harness is ours and arrives with the copy, so a dry run and a real
+# run must not differ over it, and a project with no tests of its own must not be told pytest runs.
+# Same test as verify.sh.
+has_py_tests() { # has_py_tests <tests dir>
+  [ -d "$1" ] && find "$1" -path "$1/harness" -prune -o -type f \( -name 'test_*.py' -o -name '*_test.py' \) -print 2>/dev/null | grep -q .
+}
 sensors=""
 add() { sensors="$sensors  - $1
 "; }
@@ -151,7 +163,7 @@ fi
 if [ -f "$dest/pyproject.toml" ] || [ -f "$dest/setup.cfg" ] || [ -f "$dest/requirements.txt" ]; then
   has pyright && add "typecheck: pyright"
   has ruff && add "lint: ruff"
-  has pytest && [ -d "$dest/tests" ] && add "test: pytest"
+  has pytest && has_py_tests "$dest/tests" && add "test: pytest"
 fi
 echo
 if [ -n "$sensors" ]; then
@@ -162,10 +174,20 @@ else
 fi
 
 echo
+if [ "$settings_skipped" = 1 ]; then
+  echo "WARNING: $dest/.claude/settings.json already exists and was NOT changed."
+  echo "         The harness hooks and deny rules live there, so THE GUARDS ARE OFF in this project"
+  echo "         until you merge them in from $SRC/.claude/settings.json."
+  echo
+fi
 echo "harness-init: $copied copied, $skipped skipped"
+echo
+echo "Next steps (need a human):"
+if [ "$settings_skipped" = 1 ]; then
+  echo "  0. WARNING, do this first: merge the hooks and deny rules from the boilerplate's"
+  echo "     .claude/settings.json into $dest/.claude/settings.json. Until then nothing is guarded."
+fi
 cat <<'NEXT'
-
-Next steps (need a human):
   1. CLAUDE.md: fill the remaining <placeholders> (run command) and adjust the repo map.
   2. scripts/verify.sh: set the sensor commands in the CONFIG block (harness files are human-owned).
   3. .claude/protected-paths: list your danger zones.
