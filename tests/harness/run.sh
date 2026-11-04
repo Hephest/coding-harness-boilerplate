@@ -476,5 +476,12 @@ else
   echo "SKIP  hygiene (HARNESS_MAINTAINER unset)"
 fi
 
+# ---------------- 11. topic case files ----------------
+# Each topic keeps its cases in its own file. They share this file's fixture and helpers.
+for cases in "$ROOT"/tests/harness/cases-*.sh; do
+  # shellcheck disable=SC1090
+  [ -f "$cases" ] && . "$cases"
+done
+
 echo "=== harness self-test: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]
