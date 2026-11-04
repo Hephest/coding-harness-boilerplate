@@ -95,6 +95,18 @@ cp -R /tmp/harness/{.claude,.agent,scripts,tests,docs,CLAUDE.md} .
 cat /tmp/harness/.gitignore >> .gitignore
 ```
 
+Option C also has a script. It does the same copy without overwriting anything (existing files are
+skipped and reported, `.gitignore` gets only the missing lines, and no task history comes along):
+
+```bash
+/tmp/harness/scripts/harness-init.sh --name "My App" --stack "Python, FastAPI, Postgres" --dry-run ./my-app
+/tmp/harness/scripts/harness-init.sh --name "My App" --stack "Python, FastAPI, Postgres" ./my-app
+```
+
+It works on an empty directory too. It runs no git commands and makes no network calls. It prints
+the sensors it detected and the steps left for you (step 2 below, then the first commit). If your
+project already has a `CLAUDE.md`, it keeps yours; merge the two by hand.
+
 ### 2. Make it yours
 
 1. **`CLAUDE.md`**: fill in the `<placeholders>` (project, stack, run command) and adjust the
