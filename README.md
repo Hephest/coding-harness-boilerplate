@@ -31,9 +31,9 @@ Writing "please don't" in a prompt helps a little. This boilerplate rests on two
 
 | Piece | Where | What it does |
 |---|---|---|
-| **Guard (Edit/Write)** | `.claude/hooks/guard-write.sh` | Blocks writes to secrets, to `main`, to harness files and danger zones, and, while a task is active, to anything outside its contract. Also blocks all work on a contract you haven't approved, or that changed since you did |
+| **Guard (Edit/Write)** | `.claude/hooks/guard-write.sh` | Blocks writes to secrets, to `main`, to harness files and danger zones, and to anything outside the contract of the current task (the id in a `task/<id>` branch name, else `.agent/state/active-task`). Also blocks all work on a contract you haven't approved, or that changed since you did |
 | **Guard (Bash)** | `.claude/hooks/guard-bash.sh` | Applies the same write policy to shell commands (`sed -i`, `>`, `cp`, `tee`…), blocks shell reads of secrets and the denied git forms, and limits the `reviewer` to read-only commands. Best effort, see the limits below |
-| **Contract approval** | `scripts/contract-approve.sh` | You run it to approve a contract. The agent can't. Any edit to the contract needs a fresh approval |
+| **Contract approval** | `scripts/contract-approve.sh` | You run it to approve a contract. The guard refuses the agent the usual ways of running it (best effort, see the limits below). Any edit to the contract needs a fresh approval |
 | **Fast sensor** | `.claude/hooks/post-edit-check.sh` | Checks each file right after Claude edits it: syntax always, plus format and lint where ruff, prettier or eslint is installed |
 | **Stop gate** | `.claude/hooks/stop-gate.sh` | Claude can't end its turn while `verify.sh` fails or the task has no receipt, with a loop breaker after 3 blocked stops in a row |
 | **Definition of done** | `scripts/verify.sh` | One script for typecheck, lint and tests. Exit 0 is the only proof that counts |
@@ -72,7 +72,8 @@ flowchart LR
 Review fixes are new commits, and the receipt records the real SHA.
 
 Nothing is pushed or merged for you. The agent prepares the work and you publish it. The agent
-also can't approve its own contract: you do that between the contract and the worktree.
+is blocked from approving its own contract by the usual routes: you do that between the contract
+and the worktree.
 
 ## Requirements
 
@@ -192,11 +193,11 @@ stop goes through, so a stuck task doesn't burn tokens.
 | Concept | In one paragraph |
 |---|---|
 | **Contract** | `.agent/contracts/<id>.md`: the goal, **at most 5 target files** (globs allowed), acceptance criteria that map to tests, what's out of scope, and an attempt ceiling. If a task needs more than 5 files, split it. The guard only allows writes to the listed files. |
-| **Approval** | You run `scripts/contract-approve.sh <id>`, which stores a hash of the contract under the git common dir. The guard blocks work on a task whose contract has no approval or has changed since. The agent can't run the script, and it can still edit the contract (`.agent/` stays writable) but must ask you to approve again. |
+| **Approval** | You run `scripts/contract-approve.sh <id>`, which stores a hash of the contract under the git common dir. The guard blocks work on a task whose contract has no approval or has changed since. The guard and `settings.json` refuse the agent the usual ways of running the script, and it can still edit the contract (`.agent/` stays writable) but must ask you to approve again. On a `task/<id>` branch the id in the branch name decides which contract is approved and enforced; `.agent/state/active-task` is ignored there. |
 | **Worktree** | Each task gets its own checkout on a `task/<id>` branch under `.worktrees/`. `main` stays clean, and you can throw a failed attempt away with one command. |
 | **Guard** | PreToolUse hooks that run before every Edit/Write/NotebookEdit and every Bash command. Exit 2 blocks it and tells Claude why. |
 | **Sensors** | Tools that measure "done": the fast check per edit, and the full `verify.sh` at the Stop gate. |
-| **Stop gate & loop breaker** | Claude can't finish while `verify.sh` fails or the active task has no receipt. The gate blocks at most 3 stops in a row, whatever the failure text says, and then lets Claude stop so it can escalate. "No sensors configured" (`verify.sh` exit 78) blocks once per session, then allows the stop, and never counts toward the loop breaker, so a fresh project doesn't trap you. |
+| **Stop gate & loop breaker** | Claude can't finish while `verify.sh` fails or the task has no receipt. The gate blocks at most 3 stops in a row, whatever the failure text says, and then lets Claude stop so it can escalate. "No sensors configured" (`verify.sh` exit 78) blocks once per session, then allows the stop, and never counts toward the loop breaker, so a fresh project doesn't trap you. |
 | **Receipt** | `.agent/receipts/<id>.md`: a 15-second audit covering status, verify result, reviewer verdict, files changed and attempts used. |
 | **Lessons → infrastructure** | Every failure gets one line in `.agent/lessons.md` **and** a permanent fix: a rule, test fixture, script or hook. A fix that lives only in a chat is lost. |
 | **Danger zones** | Paths in `.claude/protected-paths`. They can only be edited when the active contract names them specifically. Give each one a local `CLAUDE.md` ([template](docs/templates/MODULE_CLAUDE.md)). |
@@ -238,8 +239,12 @@ What v0.2 enforces:
 
 - **Writes.** The Edit/Write/NotebookEdit guard and the Bash guard share one write policy. A shell
   `sed -i`, `>`, `cp` or `tee` is judged like an Edit.
-- **Approval.** A human approves the contract with `scripts/contract-approve.sh`. The agent can't
-  run it, and a changed contract blocks all work until you approve it again.
+- **Approval.** A human approves the contract with `scripts/contract-approve.sh`. The guard and
+  `settings.json` refuse the agent the known ways of running it (best effort, see below), and a
+  changed contract blocks all work until you approve it again.
+- **One task id.** On a `task/<id>` branch with a contract or an approval record, `<id>` alone
+  sets approval, scope and the Stop gate's receipt check. Elsewhere `.agent/state/active-task`
+  decides, and its contract has to be approved.
 - **Secrets.** `settings.json` denies the Read tool on `.env*`, `secrets/`, `*.pem` and `*.key`,
   and the Bash guard blocks shell reads of the same paths in the commands it knows.
 - **Behaviour-shaping files.** The root `CLAUDE.md` and `.claude/rules/` are harness files now,
@@ -253,8 +258,14 @@ Known gaps in v0.2:
   one-liners (`python -c`, `node -e`), targets built from a variable or a glob, and commands it
   can't lex pass and are logged to `.agent/state/guard-bash.log`. A command that outlasts the
   hook's timeout runs unchecked.
-- Approval fixes the contract's content, not your judgement. Read it before you approve. Work on a
-  branch that isn't named `task/<id>`, with no active task, is judged only by the generic rules.
+- Approval fixes the contract's content, not your judgement. Read it before you approve. It is
+  also best effort: an agent that copies the script and `_lib.sh` elsewhere, or writes the
+  approval record with a tool the guard doesn't know, gets past it.
+- Work on a branch that isn't named `task/<id>`, with no active task, is judged only by the
+  generic rules. Renaming a task branch (`git branch -m`) drops that task's enforcement.
+- `grep -r` can read a secret by recursion, because only named paths are checked. `git log -p`,
+  `git blame` and `git archive` aren't checked as readers. `git am`, `cherry-pick`, `revert`,
+  `rebase` and `pull` can land changes in harness files.
 - Not everything is guarded. `.agent/` stays writable on purpose (contracts, receipts and
   `.agent/lessons.md`, which `/finish` appends to), and so does a module's own `CLAUDE.md`.
 - Reading a secret through an interpreter, or any program the guard doesn't know, isn't blocked.
@@ -296,7 +307,7 @@ Read the "Upgrading" notes in the [CHANGELOG](CHANGELOG.md) for each version in 
 the diff to your project, and update `.claude/HARNESS_VERSION`. Going from 0.1 to 0.2 adds
 `guard-bash.sh` and `contract-approve.sh`, and changes the hook wiring and deny list in
 `.claude/settings.json`, so merge that file by hand instead of overwriting yours. Contracts that
-are already active need one approval each.
+are already active need one approval each. The CHANGELOG's Upgrading steps list every file to take.
 
 ## Credits
 

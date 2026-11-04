@@ -8,8 +8,10 @@ also a live test of the boilerplate.
 ```bash
 git clone https://github.com/Hephest/coding-harness-boilerplate && cd coding-harness-boilerplate
 git config core.hooksPath .githooks     # optional: run the self-test before every commit
-tests/harness/run.sh                    # should end with "0 failed"
+tests/harness/run.sh                    # about 90 seconds; should end with "0 failed"
 ```
+
+The pre-commit hook runs the same self-test, so every commit waits about 90 seconds.
 
 You need `bash`, `git`, and `jq` or `python3`. `shellcheck` is optional locally; CI always
 runs it.
@@ -43,7 +45,8 @@ should turn on.
    creates the `task/<id>` worktree. Split bigger changes.
 2. **Approve.** Read the contract, then run `scripts/contract-approve.sh <id>` yourself (the
    agent can't). Edits on the branch block until you do, and again after any change to the
-   contract.
+   contract. On `task/<id>` the branch name sets the task, whatever `active-task` says. The
+   agent being unable to approve is best effort, so read the contract yourself.
 3. **Build** in the worktree. Every behaviour change to a hook or `verify.sh` gets a case that
    fails without the change. New cases go in `tests/harness/cases-<topic>.sh`, which `run.sh`
    sources; don't grow `run.sh` itself.

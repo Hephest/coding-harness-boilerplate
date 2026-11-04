@@ -77,10 +77,10 @@ sentence in a prompt.
 
 | Hook | Event | Blocks when | Exit codes |
 |---|---|---|---|
-| `guard-write.sh` | PreToolUse on Edit/Write/MultiEdit/NotebookEdit | hook input it can't parse; git missing or failing; secrets or `.git` internals; a whole repository; local permission file; harness files (unless maintainer mode); edits on `main`, `master` or a detached HEAD; a contract that isn't approved; files outside the active contract; danger zones not named in the contract | 2 = blocked (reason goes to Claude), 0 = allowed |
-| `guard-bash.sh` | PreToolUse on Bash (timeout 30 s) | the same write policy for the targets of known shell commands and redirects; known commands reading secrets; `contract-approve.sh`; `git push`, `git reset`, `git add -f` in any position and `git config` keys that run code; for the reviewer role, anything off its allowlist | 2 = blocked, 0 = allowed. What it can't resolve passes and is logged to `.agent/state/guard-bash.log` |
+| `guard-write.sh` | PreToolUse on Edit/Write/MultiEdit/NotebookEdit | hook input it can't parse; git missing or failing; secrets or `.git` internals; a whole repository; local permission file; harness files (unless maintainer mode); edits on `main`, `master` or a detached HEAD; a contract that isn't approved; files outside the contract of the task; danger zones not named in the contract | 2 = blocked (reason goes to Claude), 0 = allowed |
+| `guard-bash.sh` | PreToolUse on Bash (timeout 30 s) | the same write policy for the targets of known shell commands and redirects; known commands reading secrets; `contract-approve.sh`; `git push`, `git reset`, `git add -f` in any position and `git config` keys that run code or skip hooks (not in maintainer mode); for the reviewer role, anything off its allowlist | 2 = blocked, 0 = allowed. What it can't resolve passes and is logged to `.agent/state/guard-bash.log` |
 | `post-edit-check.sh` | PostToolUse on Edit/Write/MultiEdit/NotebookEdit | `verify.sh --fast <file>` fails (format, lint, syntax of that one file) | 2 = error sent back to Claude to fix now |
-| `stop-gate.sh` | Stop | branch has changes and `verify.sh` fails; or `verify.sh` passes and the active task has no receipt | 2 = "keep working", at most 3 stops in a row; 0 = allowed |
+| `stop-gate.sh` | Stop | branch has changes and `verify.sh` fails; or `verify.sh` passes and the task has no receipt | 2 = "keep working", at most 3 stops in a row; 0 = allowed |
 
 `.agent/` is always writable, also on `main`, so `/task` can write a contract before the
 worktree exists.
@@ -105,11 +105,31 @@ policy resolves symlinks first, then checks the real path:
   `.claude/agents/*`, `.claude/skills/*`, `.claude/commands/*`, `scripts/verify.sh`,
   `scripts/herdr-sub.sh`, `scripts/harness-init.sh`, `scripts/contract-approve.sh` and
   `tests/harness/*`.
-- **Unapproved contracts**, also in maintainer mode: on a `task/<id>` branch, or with an active
-  task, edits outside `.agent/` block until `scripts/contract-approve.sh <id>` has recorded the
-  contract's hash, and again after any edit to it. Only a human runs that script: both guards
-  and `settings.json` refuse it. Run it with `! scripts/contract-approve.sh <id>`, or in a plain
-  terminal if that is refused.
+- **Unapproved contracts**, also in maintainer mode: with a task (see below), edits outside
+  `.agent/` block until `scripts/contract-approve.sh <id>` has recorded the contract's hash, and
+  again after any edit to it. Only a human runs that script: both guards and `settings.json`
+  refuse the known ways of running it. That is best effort, not a lock: an agent that copies the
+  script and `_lib.sh` elsewhere, or writes the record with a tool the guard doesn't know, gets
+  past it (see [SECURITY.md](../SECURITY.md)). Run it with `! scripts/contract-approve.sh <id>`,
+  or in a plain terminal if that is refused.
+
+**Which task a write belongs to.** One id drives the approval check, the scope check and the Stop
+gate's receipt check (`effective_task` in `_lib.sh`):
+
+- On a `task/<id>` branch that has a contract or an approval record for `<id>`, `<id>` is the
+  task. `.agent/state/active-task` is ignored there, because the agent can rewrite that file.
+- On any other branch, and on a task branch with neither, `.agent/state/active-task` names the
+  task, and its contract has to be approved too.
+- With neither, there is no task: only the protected paths, the harness files and the `main`
+  rule apply. Renaming a task branch (`git branch -m`) puts you here, and the guard doesn't stop
+  it.
+
+The Bash guard also peels `sudo`, `doas`, `setsid`, `stdbuf`, `ionice`, `env`, `nice`, `timeout`,
+`xargs` and similar wrappers, reads `$'...'` and `$"..."` literals as the text they stand for, and
+takes `--target-directory DIR` as well as `--target-directory=DIR`. After a `cd` it can't resolve
+(`cd -`, `cd $X`), relative targets are judged from the last known directory, so `cd - && cat .env`
+blocks. Readers are checked by named path only: `grep -r KEY .` and `git log -p -- .env` pass, and
+`git am`, `cherry-pick`, `revert`, `rebase` and `pull` aren't looked into.
 
 Both guards fail closed: hook input they can't parse (malformed, or no `jq` and no working
 `python3`) blocks, and so does `git` missing or failing, because then a path can't be placed in
@@ -128,10 +148,18 @@ hook timeout of 900 seconds:
   stops in a row per session and ignores the failure text, which can differ on every run. The 3rd
   block is the last, and tells Claude to ask `architect` and report to the user. The next stop is
   allowed. A count that can't be saved also allows the stop, because it couldn't be bounded.
-- **Exit 0 with a receipt, or no active task:** the stop is allowed and the count resets.
+- **Exit 0 with a receipt, or no task:** the stop is allowed and the count resets. The task is
+  the one the guard enforces (see above), so blanking `active-task` doesn't skip the receipt.
 
 The counts live in `.agent/state/stop-blocks-<session_id>` and
 `.agent/state/sensors-warned-<session_id>`.
+
+`verify.sh` picks `pytest` only when real Python tests exist: a `test_*.py` or `*_test.py` file
+under `tests/`, not counting `tests/harness`, which holds this harness's own shell self-test.
+
+In Herdr, `herdr-sub.sh --interactive` waits until the agent has taken the prompt. A prompt that
+stalls (nothing starts working within a few seconds) fails the run, closes its tab and says so,
+instead of leaving a run that never began.
 
 ### `verify.sh` exit codes
 
@@ -155,6 +183,12 @@ Secrets, `.git` internals, whole repositories, `.claude/settings.local.json`, ma
 contract scope and contract approval stay enforced.
 With no project sensors configured, `verify.sh` then runs `tests/harness/run.sh` instead. Don't
 use maintainer mode in a normal project.
+
+## The self-test
+
+`tests/harness/run.sh` checks the hooks against a throwaway git repo and ends with a pass/fail
+count. It takes about 90 seconds, so run it before you push rather than after every edit. Cases
+live in `tests/harness/cases-<topic>.sh`, which `run.sh` sources just before its summary line.
 
 ## Costs (team routing)
 
