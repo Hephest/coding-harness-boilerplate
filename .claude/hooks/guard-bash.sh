@@ -16,10 +16,12 @@ HOOK_INPUT="$(cat)"
 LOG="$(dirname "$0")/../../.agent/state/guard-bash.log"
 CMD=""        # the whole command, for the log
 CWD=""        # where relative targets resolve; moved by cd, scoped with `local` in subshells
-CWD_OK=1      # 0 after `cd $X`: relative targets can't be resolved until an absolute cd
+CWD_OK=1      # 0 after `cd $X`: CWD is only the last known place, until an absolute cd
+HOOK_CWD=""   # the hook's own .cwd, which no cd moves. path_policy reads it
 NEST=0        # sh -c / eval depth
 LEX_BAD=0     # set by the lexer on an unterminated quote or paren
-LONG_VALS=""  # long flags that take the next word as a value, for scan_opts
+LONG_VALS=""  # long flags that take the next word as a value, for scan_opts and opts_end
+APPROVE_READ=0  # 1 once a command in this line reads the approval script
 POS=(); OPTS=(); SKIP=0; REPLY=""
 
 # Limits. Every loop in the lexer spends STEPS, so it ends even if it stops advancing. One step can
@@ -74,9 +76,11 @@ resolve_word() {
     '~'|'~/'*) w="${HOME:-}${w#'~'}" ;;
     '~'*) note "unresolved target: $w"; return 1 ;;
   esac
+  # Judged from the last known directory all the same: skipping it would make `cd $PWD` a one-token
+  # way past every relative check.
   case "$w" in
     /*) ;;
-    *) if [ "$CWD_OK" != 1 ]; then note "unknown cwd for target: $w"; return 1; fi ;;
+    *) if [ "$CWD_OK" != 1 ]; then note "unknown cwd for target: $w"; fi ;;
   esac
   REPLY="$w"
 }
@@ -114,26 +118,43 @@ into_check() {
   write_check "${1%/}/_"
 }
 
+# names_approve <word> : true when the word is the approval script, or a glob that could expand to
+# it. The word is the pattern and the name is the subject, so scripts/c* counts and scripts/v* doesn't.
+names_approve() {
+  if [ ${#1} -gt "$MAX_PATH" ]; then note "word too long"; return 1; fi
+  local base="${1##*/}"
+  # Brace expansion comes before globbing and `case` has none. Everything from the first { to the
+  # last } counts as anything: expanding it could take forever, and a timeout lets the command run.
+  case "$base" in *'{'*'}'*) base="${base%%\{*}*${base##*\}}" ;; esac
+  # shellcheck disable=SC2254
+  case contract-approve.sh in $base) return 0 ;; esac
+  return 1
+}
+
 # no_approve <word> : a contract is approved by a human, so the agent can't run the script. Holds
 # in maintainer mode too: that mode is for editing the harness, not for signing off work.
 no_approve() {
-  case "${1##*/}" in
-    contract-approve.sh) block "only the user approves a contract. Ask them to run it, with the ! prefix or in a plain terminal." ;;
-  esac
+  names_approve "$1" || return 0
+  block "only the user approves a contract. Ask them to run it, with the ! prefix or in a plain terminal."
 }
 
 # read_check <word> : narrower than the write policy. Only the secrets list applies, the committed
 # templates are fine, and it holds outside a repo too: a key is a key wherever it lies.
 read_check() {
   local p dir root rel
+  if names_approve "$1"; then APPROVE_READ=1; fi
   abs_word "$1" || return 0
   spend_check || return 0
   p="$(canon_path "$REPLY")"
-  case "${p##*/}" in .env.example|.env.sample|.env.template) return 0 ;; esac
   dir="$(dirname "$p")"; while [ ! -d "$dir" ]; do dir="$(dirname "$dir")"; done
   root="$(repo_root "$dir")"
   rel="$p"
   [ -n "$root" ] && rel="${p#"$root"/}"
+  case "${p##*/}" in
+    .env.example|.env.sample|.env.template)
+      # A template is only a template outside secrets/.
+      case "$rel" in secrets/*|*/secrets/*) ;; *) return 0 ;; esac ;;
+  esac
   [ -d "$p" ] && rel="$rel/_"                   # `cp -r secrets x` copies what's under it
   if is_secret "$rel"; then
     block "'$rel' is a protected path (secrets). Don't read it from the shell."
@@ -181,6 +202,7 @@ scan_opts() {
 }
 
 # opts_end <value letters> <args...> : sets SKIP to how many leading args are the wrapper's options.
+# A long flag in LONG_VALS, or any prefix of one as getopt_long allows, takes the next word.
 opts_end() {
   local vals="$1" a rest l; shift
   SKIP=0
@@ -188,7 +210,9 @@ opts_end() {
     a="$1"
     case "$a" in
       --) SKIP=$((SKIP + 1)); return ;;
-      --*) ;;
+      --*) case " $LONG_VALS" in
+             *" $a"*) if [ $# -gt 1 ]; then shift; SKIP=$((SKIP + 1)); fi ;;
+           esac ;;
       -?*) rest="${a#-}"
            while [ -n "$rest" ]; do
              l="${rest:0:1}"; rest="${rest:1}"
@@ -234,7 +258,7 @@ cmd_reader() {
 # unless a flag named it.
 cmd_pattern() {
   local vals="$1" a pattern_given=0; shift
-  LONG_VALS="--regexp --file --include --exclude --exclude-dir --glob --type --max-count --context"
+  LONG_VALS="--regexp --file --include --exclude --exclude-dir --glob --type --max-count --context --max-depth --threads"
   scan_opts "$vals" "$@"
   LONG_VALS=""
   for a in "${OPTS[@]}"; do
@@ -267,6 +291,10 @@ cmd_awk() {
   done
 }
 
+# GNU takes any unique prefix of a long flag, and nothing else in these tools starts with --t.
+TARGET_FLAGS="--t --ta --tar --targ --targe --target --target- --target-d --target-di --target-dir"
+TARGET_FLAGS+=" --target-dire --target-direc --target-direct --target-directo --target-director --target-directory"
+
 # cmd_copy <argv...> : cp, mv, ln and install. Sources may be secrets, the destination is a write,
 # and mv's source is a write too: it disappears from where it was.
 cmd_copy() {
@@ -274,11 +302,13 @@ cmd_copy() {
   local -a srcs=()
   shift
   [ "$tool" = install ] && vals="tSmogfB"
+  LONG_VALS="$TARGET_FLAGS"
   scan_opts "$vals" "$@"
+  LONG_VALS=""
   for o in "${OPTS[@]}"; do
     case "$o" in
       -t*) dest="${o#-t}"; into=1 ;;
-      --target-directory=*) dest="${o#*=}"; into=1 ;;
+      --t*=*) dest="${o#*=}"; into=1 ;;
       -T|--no-target-directory) notdir=1 ;;
       -r|-R|-a|--recursive|--archive) [ "$tool" = cp ] && deep=1 ;;
       -d|--directory) [ "$tool" = install ] && { for s in "${POS[@]}"; do write_check "$s"; done; return; } ;;
@@ -516,9 +546,11 @@ cmd_perl() {
   for a in "${files[@]}"; do write_check "$a"; done
 }
 
-# cmd_shell <argv...> : sh -c '<string>', inspected as a command of its own.
+# cmd_shell <argv...> : sh -c '<string>', inspected as a command of its own. A shell with no script
+# operand, or with -s, runs its stdin. A pipe isn't followed, so a read of the approval script
+# anywhere in this line counts as what feeds it: `bash -s id < x` and `cat x | bash` alike.
 cmd_shell() {
-  local CWD="$CWD" CWD_OK="$CWD_OK" a run=0
+  local CWD="$CWD" CWD_OK="$CWD_OK" a run=0 stdin=0
   shift
   while [ $# -gt 0 ]; do
     a="$1"; shift
@@ -526,11 +558,15 @@ cmd_shell() {
       -o|+o|-O|+O|--rcfile|--init-file) [ $# -gt 0 ] && shift ;;
       --*) ;;
       -*c*) run=1 ;;
+      -*s*) stdin=1 ;;
       [-+]*) ;;
-      *) if [ "$run" = 1 ]; then inspect_string "$a"; else no_approve "$a"; fi
+      *) if [ "$run" = 1 ]; then inspect_string "$a"; return; fi
+         no_approve "$a"
+         case "$stdin:$a" in 1:*|*:/dev/stdin|*:/dev/fd/0) break ;; esac
          return ;;
     esac
   done
+  if [ "$APPROVE_READ" = 1 ]; then no_approve contract-approve.sh; fi
 }
 
 # inspect_string <text> : one level deep. A string inside a string passes and is logged.
@@ -567,6 +603,7 @@ cmd_git() {
     rm) git_rm "$@" ;;
     mv) cmd_copy mv "$@" ;;
     show|diff|cat-file) git_read "$@" ;;
+    grep) cmd_pattern "efmABC" "$@" ;;    # --no-index and --untracked read files on disk
     config) git_config "$@" ;;
     *'$'*|*'`'*) note "unresolved git subcommand: $sub" ;;
   esac
@@ -640,7 +677,7 @@ git_path_check() {
     :*) note "unresolved pathspec: $1"; return 0 ;;
     *) tree_check "$1"; return 0 ;;
   esac
-  if [ "$CWD_OK" = 1 ]; then root="$(repo_root "$CWD")"; fi
+  root="$(repo_root "$CWD")"
   if [ -z "$root" ]; then note "unresolved pathspec: $1"; return 0; fi
   tree_check "$root/$p"
 }
@@ -662,8 +699,8 @@ git_read() {
 # git_blob_check <ref>:<path> : the path counts from the top of the repo, unless it starts with ./
 # or ../. A path can hold a colon and so can a ref search, so both ways of splitting are checked.
 git_blob_check() {
-  local p root=""
-  if [ "$CWD_OK" = 1 ]; then root="$(repo_root "$CWD")"; fi
+  local p root
+  root="$(repo_root "$CWD")"
   for p in "${1#*:}" "${1##*:}"; do
     case "$p" in
       ./*|../*) read_check "$p" ;;
@@ -679,7 +716,11 @@ git_config_key() {
   [ "${HARNESS_MAINTAINER:-}" = 1 ] && return 0
   local hit=0
   shopt -s nocasematch
-  case "$1" in core|alias|alias.*|core.hookspath|core.fsmonitor|core.sshcommand|include.path|includeif.*) hit=1 ;; esac
+  case "$1" in
+    core|alias|alias.*|core.hookspath|core.fsmonitor|core.sshcommand|include.path|includeif.*) hit=1 ;;
+    core.pager|core.editor|diff.external|sequence.editor) hit=1 ;;
+    filter|filter.*|credential|credential.*|gpg|gpg.*) hit=1 ;;
+  esac
   shopt -u nocasematch
   [ "$hit" = 0 ] || block "git config key '$1' can run code or skip the hooks. If it's needed, give the user the exact command to run with the ! prefix."
 }
@@ -728,7 +769,7 @@ git_apply() {
   done
   if [ ${#POS[@]} -eq 0 ]; then note "git apply from stdin"; return 0; fi
   spend_check || return 0
-  if [ "$CWD_OK" = 1 ]; then root="$(repo_root "$CWD")"; fi
+  root="$(repo_root "$CWD")"
   for a in "${POS[@]}"; do
     abs_word "$a" || continue
     if [ ! -f "$REPLY" ]; then note "git apply: no such patch: $a"; continue; fi
@@ -807,7 +848,8 @@ reviewer_check() {
            if [ ${#opt} -ge 3 ]; then
              case "--output" in "$opt"*) opt=bad ;; esac
              case "--ext-diff" in "$opt"*) opt=bad ;; esac
-             case "--textconv" in "$opt"*) opt=bad ;; esac
+             # --text is a flag of its own, and the exact name wins over the prefix.
+             if [ "$opt" != --text ]; then case "--textconv" in "$opt"*) opt=bad ;; esac; fi
              case "--no-index" in "$opt"*) opt=bad ;; esac
              case "--help" in "$opt"*) opt=bad ;; esac
            fi
@@ -823,7 +865,7 @@ reviewer_check() {
 # only wraps the real command, so `env X=1 nice git push` is still seen as git, then dispatches on
 # the basename of argv[0]. Anything not listed is none of our business.
 check_simple() {
-  local name vals
+  local name vals long
   if [ "$REVIEWER" = 1 ]; then [ $# -gt 0 ] && reviewer_check "$@"; fi
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -831,6 +873,7 @@ check_simple() {
     esac
     if is_assignment "$1"; then shift; continue; fi
     name="${1##*/}"
+    long=""
     case "$name" in
       env) vals="uCS" ;;
       nice) vals="n" ;;
@@ -838,11 +881,18 @@ check_simple() {
       timeout) vals="sk" ;;
       xargs) vals="IdEJLnPRsS" ;;
       exec) vals="a" ;;
-      command|builtin|nohup) vals="" ;;
+      command|builtin|nohup|setsid) vals="" ;;
+      sudo) vals="ughpCrtTUDR"
+            long="--user --group --host --prompt --chroot --role --type --command-timeout --other-user --close-from --chdir" ;;
+      doas) vals="uC" ;;
+      stdbuf) vals="ioe"; long="--input --output --error" ;;
+      ionice) vals="cnpPu"; long="--class --classdata --pid --pgid --uid" ;;
       *) break ;;
     esac
     shift
+    LONG_VALS="$long"
     opts_end "$vals" "$@"
+    LONG_VALS=""
     shift "$SKIP"
     if [ "$name" = timeout ] && [ $# -gt 0 ]; then shift; fi   # the duration
   done
@@ -945,8 +995,10 @@ lex_list() {
            else
              end_cmd; I=$((I + 1)); nested
            fi ;;
-      ')') end_cmd; I=$((I + 1))
-           # Unmatched at the top: a case pattern. The words before it were never a command.
+      ')') # Unmatched at the top: a case pattern. The words before it were never a command, and
+           # `*)` would read as a glob naming the approval script.
+           if [ -z "$closer" ] && [ -z "$pend" ]; then A=(); w=""; has=0; fi
+           end_cmd; I=$((I + 1))
            [ -n "$closer" ] && return 0 ;;
       '<'|'>') start_redirect ;;
       '#') if [ "$has" = 1 ]; then w+="$c"; I=$((I + 1)); else skip_comment; fi ;;
@@ -1124,8 +1176,9 @@ read_dquote() {
   done
 }
 
-# read_dollar <"dq" inside double quotes> : every form leaves a $ in the word, so a target built
-# from one counts as unresolved. A command substitution is walked on the way past.
+# read_dollar <"dq" inside double quotes> : $'...' and $"..." are text. Every other form leaves a $
+# in the word, so a target built from one counts as unresolved. A command substitution is walked on
+# the way past.
 read_dollar() {
   local rest seg
   has=1
@@ -1138,18 +1191,63 @@ read_dollar() {
          seg="${rest%%\}*}"
          w+="$seg}"; I=$((I + ${#seg} + 1)) ;;
     "'") if [ -n "$1" ]; then w+='$'; I=$((I + 1)); return 0; fi
-         I=$((I + 2)); w+='$'
-         while (( I < N )); do
-           (( STEPS-- > 0 )) || { over_budget; return 0; }
-           case "${S:I:1}" in
-             '\') I=$((I + 2)) ;;
-             "'") I=$((I + 1)); return 0 ;;
-             *) I=$((I + 1)) ;;
-           esac
-         done
-         LEX_BAD=1 ;;
+         I=$((I + 2)); read_ansi ;;
+    '"') if [ -n "$1" ]; then w+='$'; I=$((I + 1)); return 0; fi
+         I=$((I + 1)); read_dquote ;;           # $"..." is "..." with no message catalog
     *) w+='$'; I=$((I + 1)) ;;
   esac
+}
+
+# read_ansi : the cursor is just past $'. Decodes into the word, as bash does: an escape it doesn't
+# know keeps its backslash, and a NUL ends the text though the quote runs on to its close. \c, \u
+# and \U aren't decoded. They leave a $, so the word stays unresolved.
+read_ansi() {
+  local c n d v dead=0
+  while (( I < N )); do
+    (( STEPS-- > 0 )) || { over_budget; return 0; }
+    c="${S:I:1}"
+    case "$c" in
+      "'") I=$((I + 1)); return 0 ;;
+      '\') (( (STEPS -= 2) > 0 )) || { over_budget; return 0; }   # reads S three times
+           n="${S:I+1:1}"; I=$((I + 2)); v=""
+           case "$n" in
+             n) c=$'\n' ;;
+             t) c=$'\t' ;;
+             r) c=$'\r' ;;
+             a) c=$'\a' ;;
+             b) c=$'\b' ;;
+             e|E) c=$'\033' ;;
+             f) c=$'\f' ;;
+             v) c=$'\v' ;;
+             '\'|"'"|'"'|'?') c="$n" ;;
+             c|u|U) c='$' ;;
+             x) d="${S:I:2}"
+                case "$d" in
+                  [0-9a-fA-F][0-9a-fA-F]) v=$((16#$d)) ;;
+                  [0-9a-fA-F]*) d="${d:0:1}"; v=$((16#$d)) ;;
+                  *) d=""; c='\x' ;;
+                esac
+                I=$((I + ${#d})) ;;
+             [0-7]) d="${S:I-1:3}"
+                    case "$d" in
+                      [0-7][0-7][0-7]) ;;
+                      [0-7][0-7]*) d="${d:0:2}" ;;
+                      *) d="${d:0:1}" ;;
+                    esac
+                    v=$((8#$d)); I=$((I + ${#d} - 1)) ;;
+             *) c="\\$n" ;;
+           esac
+           if [ -n "$v" ]; then
+             v=$((v & 255))
+             if [ "$v" = 0 ]; then dead=1; continue; fi
+             printf -v d '%03o' "$v"
+             printf -v c '%b' "\\0$d"
+           fi ;;
+      *) I=$((I + 1)) ;;
+    esac
+    [ "$dead" = 1 ] || w+="$c"
+  done
+  LEX_BAD=1
 }
 
 read_backtick() {
@@ -1183,6 +1281,7 @@ if ! CMD="$(json_get '.tool_input.command')"; then
 fi
 [ -n "$CMD" ] || block "the hook input names no command, so it can't be checked."
 CWD="$(json_get '.cwd')"; CWD="${CWD:-$PWD}"
+HOOK_CWD="$CWD"
 reviewer_role
 
 # Bytes, not characters: ${S:I:1} would count multibyte characters from the start on every call.

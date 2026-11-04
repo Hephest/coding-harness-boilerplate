@@ -90,9 +90,19 @@ is_harness() {
   return 1
 }
 
-# contract_targets <contract> : bullet lines under "## Target files", until the next heading.
+# contract_targets <contract> : bullet lines under "## Target files", until the next heading. Plain
+# bash: every write on a task with a contract comes through here, and needing awk would block them.
 contract_targets() {
-  awk '/^## Target files/{f=1;next} /^## /{f=0} f && /^- /{sub(/^- +/,""); gsub(/`/,""); print}' "$1"
+  local line f=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '## Target files'*) f=1 ;;
+      '## '*) f=0 ;;
+      '- '*) [ "$f" = 1 ] || continue
+             line="${line#- }"; line="${line#"${line%%[! ]*}"}"
+             printf '%s\n' "${line//\`/}" ;;
+    esac
+  done < "$1"
 }
 
 # sha256_of <file> : the hash, or non-zero when no tool can make one. Read from stdin, because
@@ -123,19 +133,40 @@ approval_hint() {
   echo "Everything under .agent/ stays writable, so the contract can still be fixed." >&2
 }
 
-# approval_policy <root> <branch> : the contract for this work must be the one a human approved.
-# The id comes from the branch, so blanking active-task doesn't skip this. An approval outlives its
-# contract, so deleting the contract doesn't either. The contract is read from the checkout being
-# written to. One pass per hook run: the contract doesn't change while a command is being checked.
-approval_policy() {
-  local root="$1" branch="$2" id record contract want="" got
+# effective_task <root> <branch> : sets TASK_ID to the one id that drives approval and scope, empty
+# for no task, and TASK_RECORD to where its approval lives, empty when git can't say. On task/<id>
+# with a contract or an approval record that is <id>, whatever active-task says: the agent can
+# rewrite that file, so it can't be what picks the rules. Any other branch, and a task branch with
+# neither, goes by active-task. Worked out once per checkout per hook run.
+effective_task() {
+  local root="$1" branch="$2" id="" record=""
+  [ "${TASK_FOR:-}" = "$root:$branch" ] && return 0
   case "$branch" in
-    task/*) id="${branch#task/}" ;;
-    *) id="$(active_task "$root")" ;;
+    task/*) id="${branch#task/}"
+            # No common dir: the id stays, so approval_policy blocks instead of guessing.
+            if record="$(approval_file "$root" "$id")" \
+               && [ ! -f "$record" ] && [ ! -f "$root/.agent/contracts/$id.md" ]; then
+              id=""
+            fi ;;
   esac
+  if [ -z "$id" ]; then
+    id="$(active_task "$root")"
+    record=""
+    if [ -n "$id" ]; then record="$(approval_file "$root" "$id")"; fi
+  fi
+  TASK_ID="$id"; TASK_RECORD="$record"; TASK_FOR="$root:$branch"
+}
+
+# approval_policy <root> <id> <record> : the contract for this work must be the one a human
+# approved. Both come from effective_task, so blanking active-task doesn't skip this. An approval
+# outlives its contract, so deleting the contract doesn't either. The contract is read from the
+# checkout being written to. One pass per hook run: the contract doesn't change while a command is
+# being checked.
+approval_policy() {
+  local root="$1" id="$2" record="$3" contract want="" got
   [ -n "$id" ] || return 0
   [ "${APPROVAL_PASSED:-}" = "$root:$id" ] && return 0
-  if ! record="$(approval_file "$root" "$id")"; then
+  if [ -z "$record" ]; then
     echo "BLOCKED: git can't name its common dir here, so the contract for '$id' can't be checked." >&2
     return 2
   fi
@@ -161,6 +192,13 @@ approval_policy() {
   APPROVAL_PASSED="$root:$id"
 }
 
+# holds_repo <dir, with a trailing slash> <cwd> : true when the repo around <cwd> is under the dir.
+holds_repo() {
+  local root
+  root="$(repo_root "$2")"
+  [ -n "$root" ] && case "$root/" in "$1"*) true ;; *) false ;; esac
+}
+
 # path_policy <path> <cwd> [parent] : POLICY + CONTRACT invariants for one write. Every way of
 # writing a file (Edit, Write, a shell redirect) comes through here. Relative paths resolve against
 # <cwd>, the hook's .cwd, never $PWD. With "parent", stops after the protected paths: for a
@@ -182,12 +220,13 @@ path_policy() {
   esac
 
   # 0b. A directory that holds a .git, or holds the repo we're working in, holds everything below
-  #     it, secrets included. Holds in maintainer mode, like .git itself.
+  #     it, secrets included. Holds in maintainer mode, like .git itself. HOOK_CWD is where a shell
+  #     command started: after `cd /tmp`, <cwd> alone no longer knows which repo that was.
   if [ -d "$file" ]; then
-    root="$(repo_root "$cwd")"
     # Built first: on bash 5.2 a quoted expansion that strips to empty, right before /*, never matches.
     under="${file%/}/"
-    if [ -e "$file/.git" ] || { [ -n "$root" ] && case "$root/" in "$under"*) true ;; *) false ;; esac; }; then
+    if [ -e "$file/.git" ] || holds_repo "$under" "$cwd" \
+       || { [ -n "${HOOK_CWD:-}" ] && [ "$HOOK_CWD" != "$cwd" ] && holds_repo "$under" "$HOOK_CWD"; }; then
       echo "BLOCKED: '$file' holds a whole repository, .git included. Name the paths inside it instead." >&2; return 2
     fi
   fi
@@ -235,10 +274,12 @@ path_policy() {
   fi
 
   # 3b. Approval: after the .agent/* exit above, so a blocked agent can still fix its contract.
-  approval_policy "$root" "$branch" || return 2
+  effective_task "$root" "$branch"
+  task="$TASK_ID"
+  approval_policy "$root" "$task" "$TASK_RECORD" || return 2
 
-  # 4. Contract scope: if a task is active, only its target files may change.
-  task="$(active_task "$root")"
+  # 4. Contract scope: if a task is active, only its target files may change. Same id as above, so
+  #    what was approved is what gets enforced.
 
   # 4a. Danger zones (.claude/protected-paths): need an active contract that names them.
   zone=""
