@@ -26,12 +26,17 @@ if [ "$rc" = 0 ] && [ "$first" = "$(hi_tree "$t")" ] && [ "$gi" = "$(cat "$t/.gi
   ok "harness-init: idempotent"; else bad "harness-init: idempotent (rc=$rc dups=$dups)"; fi
 
 # placeholders: --name/--stack change only the two header lines, and only in a CLAUDE.md we copied
-t="$(hi_new)"
-"$hi" --name 'Acme & Co/x' --stack 'Go, chi, PG' "$t" >/dev/null 2>&1
-d="$(diff "$ROOT/CLAUDE.md" "$t/CLAUDE.md" | grep -c '^[<>]')"
-if grep -qxF -- '- **What:** Acme & Co/x: <one sentence on what this repo does>' "$t/CLAUDE.md" \
-   && grep -qxF -- '- **Stack:** Go, chi, PG' "$t/CLAUDE.md" && [ "$d" = 4 ]; then
-  ok "harness-init: placeholders"; else bad "harness-init: placeholders (changed lines: $d)"; fi
+# A project that has filled in either one has nothing left for this row to change.
+if grep -qF '<project name>' "$ROOT/CLAUDE.md" && grep -qF '<language, framework, DB>' "$ROOT/CLAUDE.md"; then
+  t="$(hi_new)"
+  "$hi" --name 'Acme & Co/x' --stack 'Go, chi, PG' "$t" >/dev/null 2>&1
+  d="$(diff "$ROOT/CLAUDE.md" "$t/CLAUDE.md" | grep -c '^[<>]')"
+  if grep -qxF -- '- **What:** Acme & Co/x: <one sentence on what this repo does>' "$t/CLAUDE.md" \
+     && grep -qxF -- '- **Stack:** Go, chi, PG' "$t/CLAUDE.md" && [ "$d" = 4 ]; then
+    ok "harness-init: placeholders"; else bad "harness-init: placeholders (changed lines: $d)"; fi
+else
+  echo "SKIP  harness-init: placeholders (CLAUDE.md here has them filled in)"
+fi
 t="$(hi_new)"; printf '<project name> keep\n' > "$t/CLAUDE.md"
 "$hi" --name X "$t" >/dev/null 2>&1
 if [ "$(cat "$t/CLAUDE.md")" = '<project name> keep' ]; then ok "harness-init: placeholders (own CLAUDE.md untouched)"

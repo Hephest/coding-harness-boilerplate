@@ -375,12 +375,17 @@ EOF
 
   # The hook itself, through a real commit from a linked worktree (that is what exports GIT_DIR).
   # Copied into the throwaway repo's .git/hooks, so core.hooksPath stays unset everywhere.
-  mkdir -p "$sac/.git/hooks"
-  cp "$ROOT/.githooks/pre-commit" "$sac/.git/hooks/pre-commit"
-  HOOK_PROBE="$aux/hook-env" g "$sac/.worktrees/hook" commit -q --allow-empty -m "hook probe"
-  if [ ! -f "$aux/hook-env" ]; then bad "git env leak: pre-commit ran the self-test"
-  elif [ -s "$aux/hook-env" ]; then bad "git env leak: pre-commit clears git env ($(tr '\n' ' ' < "$aux/hook-env"))"
-  else ok "git env leak: pre-commit clears git env"; fi
+  # harness-init doesn't copy .githooks/, so an installed project has no hook to run.
+  if [ -f "$ROOT/.githooks/pre-commit" ]; then
+    mkdir -p "$sac/.git/hooks"
+    cp "$ROOT/.githooks/pre-commit" "$sac/.git/hooks/pre-commit"
+    HOOK_PROBE="$aux/hook-env" g "$sac/.worktrees/hook" commit -q --allow-empty -m "hook probe"
+    if [ ! -f "$aux/hook-env" ]; then bad "git env leak: pre-commit ran the self-test"
+    elif [ -s "$aux/hook-env" ]; then bad "git env leak: pre-commit clears git env ($(tr '\n' ' ' < "$aux/hook-env"))"
+    else ok "git env leak: pre-commit clears git env"; fi
+  else
+    echo "SKIP  git env leak: pre-commit clears git env (no .githooks/pre-commit in this project)"
+  fi
 fi
 
 # ---------------- 7. .gitignore ----------------

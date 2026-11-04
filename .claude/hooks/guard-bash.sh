@@ -956,6 +956,7 @@ check_redirect() {
 # One pass over the string in S, cursor I, length N. The word in progress (w, has), the simple
 # command in progress (A, RO, RT), the redirect waiting for its word (pend) and the heredocs waiting
 # for their newline (HD) are locals of lex_list, so a nested $(...) gets its own by dynamic scope.
+# cmdpos is 1 while only bare keywords have been read, which is where (( and [[ are syntax.
 
 DQ_STOP='["\\$`]*'    # what ends a run of plain characters inside double quotes
 S=""; I=0; N=0; DEPTH=0
@@ -963,6 +964,7 @@ S=""; I=0; N=0; DEPTH=0
 # lex_string <text> : lexes and inspects a whole command line.
 lex_string() {
   local S="$1" I=0 N=${#1}
+  local -a NOT_ARITH=()
   lex_list ""
   if [ "$REVIEWER" = 1 ] && { [ "$OVER" = 1 ] || [ "$LEX_BAD" = 1 ]; }; then
     block "reviewer: this command can't be fully read (unterminated quote or paren, or over the limit), so it isn't run."
@@ -974,7 +976,7 @@ lex_string() {
 
 # lex_list <closer> : walks a list of commands. With closer ")" it stops at the matching paren.
 lex_list() {
-  local closer="$1" c n w="" has=0 pend=""
+  local closer="$1" c n w="" has=0 pend="" cmdpos=1
   local -a A=() RO=() RT=() HD=()
   while (( I < N )); do
     (( STEPS-- > 0 )) || { over_budget; break; }
@@ -992,8 +994,9 @@ lex_list() {
                   else pend='&>'; I=$((I + 2)); fi ;;
              *) end_cmd; I=$((I + 1)) ;;
            esac ;;
-      '(') if [ "$has" = 0 ] && [ ${#A[@]} = 0 ] && [ "${S:I+1:1}" = '(' ]; then
-             skip_arith                         # (( x > 3 )) has no redirects in it
+      '(') end_word
+           if [ "$cmdpos" = 1 ] && [ -z "$pend" ] && [ "${S:I+1:1}" = '(' ] && skip_arith; then
+             cmdpos=0                           # (( x > 3 )) has no redirects in it
            else
              end_cmd; I=$((I + 1)); nested
            fi ;;
@@ -1011,6 +1014,8 @@ lex_list() {
       '"') read_dquote ;;
       '$') read_dollar "" ;;
       '`') read_backtick ;;
+      '[') if [ "$cmdpos$has" = 10 ] && [ -z "$pend" ] && read_cond; then :
+           else w+="$c"; has=1; I=$((I + 1)); fi ;;
       *) w+="$c"; has=1; I=$((I + 1)) ;;
     esac
   done
@@ -1030,6 +1035,8 @@ end_word() {
   # Past this size pattern work on a word gets slow, and no path or flag is that long. The $ makes
   # it unresolved, same as a variable.
   if [ ${#w} -gt "$MAX_WORD" ]; then note "word too long"; w='$'; fi
+  # After a redirect the next word is a command name whatever it spells: `>x if` runs a program.
+  if [ "$cmdpos" = 1 ] && { [ -n "$pend" ] || ! bare_keyword; }; then cmdpos=0; fi
   case "$pend" in
     '') A+=("$w") ;;
     '<<'|'<<-') HD+=("$pend:$w") ;;
@@ -1039,19 +1046,26 @@ end_word() {
   pend=""; w=""; has=0
 }
 
+# bare_keyword : is the word just read one that (( or [[ can follow? Only as written: bash runs
+# "if" and \if as commands, and opens their redirects. The cursor is just past the word.
+bare_keyword() {
+  local at=$((I - ${#w}))
+  case "$w" in if|elif|while|until|for|'!'|'{'|do|then|else) ;; *) return 1 ;; esac
+  [ "$at" -ge 0 ] && [ "${S:at:${#w}}" = "$w" ] || return 1
+  [ "$at" = 0 ] && return 0
+  case "${S:at-1:1}" in '\'|'"'|"'") return 1 ;; esac
+}
+
 end_cmd() {
   local i=0
   end_word
   pend=""
-  # Inside [[ ]], < and > compare strings.
-  if [ ${#A[@]} = 0 ] || [ "${A[0]}" != '[[' ]; then
-    while [ "$i" -lt ${#RO[@]} ]; do
-      check_redirect "${RO[i]}" "${RT[i]}"
-      i=$((i + 1))
-    done
-  fi
+  while [ "$i" -lt ${#RO[@]} ]; do
+    check_redirect "${RO[i]}" "${RT[i]}"
+    i=$((i + 1))
+  done
   [ ${#A[@]} = 0 ] || check_simple "${A[@]}"
-  A=(); RO=(); RT=()
+  A=(); RO=(); RT=(); cmdpos=1
 }
 
 start_redirect() {
@@ -1125,17 +1139,72 @@ skip_body() {
   done
 }
 
-# skip_arith : the cursor is on the first paren of (( or $((.
+# skip_arith : the cursor is on the first paren of (( or $((. Bash reads arithmetic only when the
+# paren matching the second one is followed straight away by a third, so ((a) ; (b)) is two
+# subshells in a third. That case returns 1 with the cursor back in place, and the caller lexes it
+# as a list. Commands in the expression are checked on the way past. Failures are remembered: each
+# is read twice, so nested unclosed $(( would double per level and use up the budget.
 skip_arith() {
-  local depth=0
+  [ -z "${NOT_ARITH[I]:-}" ] || return 1
+  if [ "$DEPTH" -ge "$MAX_DEPTH" ]; then over_budget; return 0; fi
+  local start=$I bad=$LEX_BAD depth=1 from w="" has=0 DEPTH=$((DEPTH + 1))
+  I=$((I + 2))
   while (( I < N )); do
     (( STEPS-- > 0 )) || { over_budget; return 0; }
     case "${S:I:1}" in
-      '(') depth=$((depth + 1)) ;;
-      ')') depth=$((depth - 1))
-           if [ "$depth" = 0 ]; then I=$((I + 1)); return 0; fi ;;
+      '(') depth=$((depth + 1)); I=$((I + 1)) ;;
+      ')') depth=$((depth - 1)); I=$((I + 1))
+           if [ "$depth" = 0 ]; then
+             if [ "${S:I:1}" = ')' ]; then I=$((I + 1)); return 0; fi
+             break
+           fi ;;
+      '\') I=$((I + 2)) ;;
+      "'") from=$((I + 1)); read_squote
+           # Arithmetic is read as if double-quoted, so these quotes may not stop a substitution.
+           case "${S:from:I-from}" in *'$('*|*'`'*) lex_string "\"${S:from:I-from-1}\"" ;; esac ;;
+      '"') read_dquote ;;
+      '$') read_dollar "" ;;
+      '`') read_backtick ;;
+      *) I=$((I + 1)) ;;
     esac
-    I=$((I + 1))
+  done
+  [ "$OVER" != 1 ] || return 0
+  NOT_ARITH[start]=1; I=$start; LEX_BAD=$bad
+  return 1
+}
+
+# read_cond : the cursor is on a [ where a command can start. Returns 1 unless it opens a [[. In
+# there < > && || ( ) are operators, so nothing is a redirect or a new command, while substitutions
+# still run. Stops at the ]], or at what no [[ can hold: in $([[ a ) && b, bash 3.2 still runs b.
+read_cond() {
+  local c n paren=0
+  case "${S:I:3}" in '[[ '|$'[[\t'|$'[[\n'|'[[(') ;; *) return 1 ;; esac
+  A+=('[['); cmdpos=0; I=$((I + 2))
+  while (( I < N )); do
+    (( STEPS-- > 0 )) || { over_budget; return 0; }
+    c="${S:I:1}"
+    case "$c" in
+      ' '|$'\t'|$'\n'|'&'|'|') end_word; I=$((I + 1)) ;;
+      '<'|'>') if [ "${S:I+1:1}" = '(' ]; then start_redirect   # process substitution
+               else end_word; I=$((I + 1)); fi ;;
+      '(') end_word; paren=$((paren + 1)); I=$((I + 1)) ;;
+      ')') [ "$paren" -gt 0 ] || return 0
+           end_word; paren=$((paren - 1)); I=$((I + 1)) ;;
+      ';') return 0 ;;
+      ']') if [ "$has" = 0 ] && [ "${S:I+1:1}" = ']' ]; then
+             A+=(']]'); I=$((I + 2)); return 0
+           fi
+           w+="$c"; has=1; I=$((I + 1)) ;;
+      '#') if [ "$has" = 1 ]; then w+="$c"; I=$((I + 1)); else skip_comment; fi ;;
+      '\') n="${S:I+1:1}"
+           if [ "$n" != $'\n' ]; then w+="$n"; has=1; fi
+           I=$((I + 2)) ;;
+      "'") read_squote ;;
+      '"') read_dquote ;;
+      '$') read_dollar "" ;;
+      '`') read_backtick ;;
+      *) w+="$c"; has=1; I=$((I + 1)) ;;
+    esac
   done
   LEX_BAD=1
 }
@@ -1185,7 +1254,8 @@ read_dollar() {
   local rest seg
   has=1
   case "${S:I+1:1}" in
-    '(') if [ "${S:I+2:1}" = '(' ]; then I=$((I + 1)); skip_arith
+    '(') if [ "${S:I+2:1}" = '(' ]; then
+           I=$((I + 1)); skip_arith || { I=$((I + 1)); nested; }
          else I=$((I + 2)); nested; fi
          w+='$' ;;
     '{') rest="${S:I:WINDOW}"

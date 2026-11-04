@@ -30,7 +30,7 @@ bash_in() { # bash_in <cwd> <command>
 # Rows only read the fixture and the hook is a fresh process per row, so rows run PAR_MAX at a time.
 # Each job writes its PASS/FAIL lines to its own file. They are printed, and counted, in the order
 # the jobs were started, so the output is the same as a serial run and a failure still names its row.
-# One job per core, 16 at most: the big inputs have a 15 second limit, which a starved job would miss.
+# One job per core, 16 at most: the big inputs have a 25 second limit, which a starved job would miss.
 PAR_MAX="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
 case "$PAR_MAX" in ''|*[!0-9]*|0) PAR_MAX=2 ;; esac
 [ "$PAR_MAX" -gt 16 ] && PAR_MAX=16
@@ -646,6 +646,69 @@ gb 0 "contract: sed's BSD suffix is no target" "$wt" "sed -i .bak 's/a/b/' src/a
 gb 2 "contract: sed's dotted file is a target"  "$wt" "sed -e 's/a/b/' -i .other"  "outside the contract"
 gb 0 "contract: agent dir"     "$wt" 'echo x >> .agent/lessons.md'
 gb 0 "contract: read outside"  "$wt" 'cat src/other.py'
+
+# A comparison is not a redirect, wherever the construct starts. These sit in the active-task block
+# so a target read from `x > 3` reaches the contract check and fails the row.
+gb 0 "compare: while (( ))"    "$wt" 'while (( n > 0 )); do n=$((n-1)); done'
+gb 0 "compare: if (( ))"       "$wt" 'if (( x > 3 )); then echo y; fi'
+gb 0 "compare: if ! (( ))"     "$wt" 'if ! (( x > 3 )); then :; fi'
+gb 0 "compare: if [[ ]]"       "$wt" 'if [[ a > b ]]; then :; fi'
+gb 0 "compare: [[ && ]]"       "$wt" 'if [[ a > b && c > d ]]; then :; fi'
+gb 0 "compare: for (( ))"      "$wt" 'for ((i=0; i>3; i++)); do :; done'
+gb 0 "compare: do (( ))"       "$wt" 'for i in 1 2; do (( i > 1 )) && echo y; done'
+gb 0 "compare: elif (( ))"     "$wt" 'if false; then :; elif (( x > 3 )); then :; fi'
+gb 0 "compare: until (( ))"    "$wt" 'until (( n > 0 )); do :; done'
+gb 0 "compare: then (( ))"     "$wt" 'if true; then (( x > 3 )); fi'
+gb 0 "compare: else (( ))"     "$wt" 'if false; then :; else (( x > 3 )); fi'
+gb 0 "compare: { (( ))"        "$wt" '{ (( x > 3 )); }'
+gb 0 "compare: if(( )) with no space" "$wt" 'if(( x > 3 )); then :; fi'
+gb 0 "compare: while ! [[ ]]"  "$wt" 'while ! [[ a > b ]]; do :; done'
+gb 0 "compare: [[ ]] groups"   "$wt" 'if [[ ( a > b ) || c < d ]]; then :; fi'
+gb 0 "compare: [[ ]] with no spaces" "$wt" 'if [[(a>b)]]; then :; fi'
+gb 0 "compare: [[ ]] regex"    "$wt" 'if [[ $x =~ (a|b) ]]; then :; fi'
+
+# A real redirect next to those constructs is still a redirect.
+gb 2 "compare: redirect after if"      "$wt" 'if true > .env; then :; fi'           "protected path"
+gb 2 "compare: redirect in a loop"     "$wt" 'while read x; do echo y > .env; done' "protected path"
+gb 2 "compare: redirect after (( ))"   "$wt" 'if (( x > 3 )) > .env; then :; fi'    "protected path"
+gb 2 "compare: redirect after if [[ ]]" "$wt" 'if [[ a > b ]] > .env; then :; fi'   "protected path"
+gb 2 "compare: redirect after [[ ]]"   "$wt" '[[ a > b ]] > .env'                   "protected path"
+gb 2 "compare: redirect after [[ ]] &&" "$wt" '[[ a > b ]] && echo y > .env'        "protected path"
+gb 2 "compare: [ ] has no comparison"  "$wt" '[ a > .env ]'                         "protected path"
+# Only the bare word is a keyword: bash runs each of these as a command and opens the file.
+gb 2 'compare: quoted [[ is a command' "$wt" '"[[" a > .env'                        "protected path"
+gb 2 "compare: quoted if is a command" "$wt" '"if" [[ a > .env ]]'                  "protected path"
+gb 2 "compare: escaped if is a command" "$wt" '\if [[ a > .env ]]'                  "protected path"
+gb 2 "compare: if after a redirect is a command" "$wt" '> /dev/null if [[ a > .env ]]' "protected path"
+gb 2 "compare: [[ after a redirect is a command" "$wt" 'if > /dev/null [[ a > .env ]]; then :; fi' "protected path"
+
+# A command inside the exempted constructs is still a command. Each block has a clean twin, so the
+# row can't pass by blocking everything.
+gb 0 "compare: clean \$( ) in (( ))"     "$wt" 'if (( $(true) > 0 )); then :; fi'
+gb 2 "compare: \$( ) in (( ))"           "$wt" 'if (( $(git push) > 0 )); then :; fi' "denied"
+gb 0 "compare: clean backticks in (( ))" "$wt" 'if (( `true` > 0 )); then :; fi'
+gb 2 "compare: backticks in (( ))"       "$wt" 'if (( `git push` > 0 )); then :; fi' "denied"
+gb 0 "compare: clean \$( ) in \$(( ))"   "$wt" 'echo $(( $(true) > 0 ))'
+gb 2 "compare: \$( ) in \$(( ))"         "$wt" 'echo $(( $(git push) > 0 ))'        "denied"
+gb 0 "compare: clean backticks in \$(( ))" "$wt" 'echo $(( `true` > 0 ))'
+gb 2 "compare: backticks in \$(( ))"     "$wt" 'echo $(( `git push` > 0 ))'         "denied"
+gb 0 "compare: clean subshells in (( )"  "$wt" 'if ((true) ; (ls)); then :; fi'
+gb 2 "compare: subshells in (( )"        "$wt" 'if ((git push) ; (ls)); then :; fi' "denied"
+gb 2 "compare: subshell before a space"  "$wt" '((git push) )'                      "denied"
+gb 2 "compare: subshells in \$(( )"      "$wt" 'echo $((git push) ; (ls))'          "denied"
+gb 2 "compare: redirect in a subshell"   "$wt" '((true) ; (echo y > .env))'         "protected path"
+gb 2 "compare: quoted \$( ) in (( ))"    "$wt" 'if (( "$(git push)" > 0 )); then :; fi' "denied"
+gb 2 "compare: \$( ) in '' in (( ))"     "$wt" "if (( '\$(git push)' > 0 )); then :; fi" "denied"
+gb 0 "compare: clean \$( ) in [[ ]]"     "$wt" 'if [[ -n $(true) ]]; then :; fi'
+gb 2 "compare: \$( ) in [[ ]]"           "$wt" 'if [[ -n $(git push) ]]; then :; fi' "denied"
+gb 2 "compare: backticks after && in [[ ]]" "$wt" 'if [[ a > b && -n `git push` ]]; then :; fi' "denied"
+gb 2 "compare: process substitution in [[ ]]" "$wt" '[[ -e <(git push) ]]'          "denied"
+gb 2 "compare: command after [[ ]]"      "$wt" '[[ a > b ]] && git push'            "denied"
+gb 2 "compare: [[ cut off by its \$( )"  "$wt" 'echo $([[ a ) && git push'          "denied"
+
+# The exemption needs keywords and nothing else before the construct.
+gb 2 "compare: (( )) after a word"     "$wt" 'echo if (( x > 3 ))'                  "outside the contract"
+gb 2 "compare: [[ ]] after a word"     "$wt" 'echo if [[ a > .env ]]'               "protected path"
 rm -f "$wt/.agent/state/active-task"
 cp "$aux/demo.md.keep" "$wt/.agent/contracts/demo.md"
 gb 2 "danger zone without contract" "$wt" 'echo x > src/billing/pay.py' "danger zone"
@@ -707,8 +770,8 @@ done
 
 # --- Must finish: a timeout passes the command unchecked and unlogged, so a hang is a hole ---
 # A background run with a kill: stock macOS has no `timeout`, and a regression must fail its case,
-# not hang the self-test. The limit is half the 30 seconds in settings.json.
-gb_limit=15
+# not hang the self-test. The limit stays under the 30 seconds in settings.json.
+gb_limit=25
 gb_finish() { # gb_finish <expected-exit> <name> <file holding the hook input> [limit]
   local want="$1" name="$2" file="$3" limit="${4:-$gb_limit}" pid got end=$((SECONDS + ${4:-$gb_limit}))
   ( unset HARNESS_MAINTAINER HARNESS_ROLE
@@ -856,8 +919,16 @@ mf_case mf_over 'a$' 19 "1MB of specials in double quotes" '\"' '\"'
 mf_case mf_over '`x` ' 17 "512KB of backticks"
 mf_case mf_over '# x\n' 18 "1MB of comment lines"
 mf_case mf_over '( ' 15 "32768 open parens"
-mf_parens() { rep '(' 15; gb_big "$REP"; gb_finish 0 "32768 parens in a row, read as arithmetic" "$gb_fin"; }
+mf_parens() { rep '(' 15; gb_big "$REP"; gb_finish 0 "32768 parens in a row" "$gb_fin"; }
 mf_case mf_parens
+# Each `$(( ... ) )` is read twice, as arithmetic and then as a list. Without a memo of the failures
+# that doubles per level, the budget runs out, and the git push after them is never seen.
+mf_arith() {
+  rep '$((' 3; local open="$REP"; rep '$((' 4; open+="$REP"
+  rep ') ) ' 3; local shut="$REP"; rep ') ) ' 4; shut+="$REP"
+  gb_big "echo $open 1 $shut; git push"; gb_finish 2 "24 levels of not quite arithmetic" "$gb_fin"
+}
+mf_case mf_arith
 mf_case mf_over '$(' 15 "32768 open substitutions"
 mf_case mf_over 'echo x > a; ' 12 "4096 targets"
 mf_case mf_over 'x' 22 "4MB word"
