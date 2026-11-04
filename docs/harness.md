@@ -24,7 +24,9 @@ the [README](../README.md). It is built on two ideas:
 │   │   ├── reviewer.md           #   sonnet · cold-context diff review → ACCEPT/REJECT
 │   │   └── architect.md          #   opus   · plans, escalations, big changes, <200 words
 │   ├── hooks/                    # SENSORS + POLICY, deterministic
-│   │   ├── guard-write.sh        #   PreToolUse: no secrets, no main branch, contract scope only
+│   │   ├── guard-write.sh        #   PreToolUse (Edit/Write/NotebookEdit): reads the path, _lib.sh decides
+│   │   ├── guard-bash.sh         #   PreToolUse (Bash): same policy for shell writes; best effort
+│   │   ├── _lib.sh               #   shared: write policy, contract approval check, path helpers
 │   │   ├── post-edit-check.sh    #   PostToolUse: fast lint/syntax on the edited file
 │   │   └── stop-gate.sh          #   Stop: verify.sh must pass + receipt must exist; loop breaker
 │   ├── commands/
@@ -49,7 +51,10 @@ the [README](../README.md). It is built on two ideas:
 │   └── templates/MODULE_CLAUDE.md#   local CLAUDE.md for danger-zone modules
 ├── scripts/verify.sh             # the only definition of "done"
 ├── scripts/herdr-sub.sh          # run/start/wait/list subagents as background Herdr tabs
+├── scripts/contract-approve.sh   # a human approves a contract (hash under .git); the agent can't run it
+├── scripts/harness-init.sh       # copy the harness into a project, print the next steps
 ├── tests/harness/run.sh          # self-test: proves the hooks still enforce what this doc says
+├── tests/harness/cases-*.sh      #   test cases by topic, sourced by run.sh
 └── .worktrees/                   # isolated task checkouts (gitignored)
 ```
 
@@ -60,39 +65,58 @@ sentence in a prompt.
 
 | # | Invariant | What it means | Where it lives |
 |---|---|---|---|
-| 1 | **Contract** | Every task has written, bounded scope: ≤5 target files, testable acceptance criteria, an attempt ceiling. | `.agent/contracts/`, enforced by `guard-write.sh` |
+| 1 | **Contract** | Every task has written, bounded scope: ≤5 target files, testable acceptance criteria, an attempt ceiling. A human approves it, and an edit voids the approval. | `.agent/contracts/`, `scripts/contract-approve.sh`, enforced by `guard-write.sh` and `guard-bash.sh` |
 | 2 | **Context** | The model sees only what the task needs: a short CLAUDE.md, with everything else loaded on demand. | CLAUDE.md <150 lines, `docs/` on demand, `.claude/rules/` and local `CLAUDE.md` per danger zone, `Explore` on haiku |
-| 3 | **Tools / isolation** | Work happens in a throwaway checkout, never on the main branch. | git worktrees; the guard blocks edits on `main`/`master` |
+| 3 | **Tools / isolation** | Work happens in a throwaway checkout, never on the main branch. | git worktrees; the guards block edits on `main`/`master`, also by shell redirect |
 | 4 | **State** | Progress lives on disk, not in the chat, so a crashed session loses nothing. | `.agent/`: contracts, receipts, active task |
 | 5 | **Sensors** | "Done" is measured by tools, not claimed by the model. | `scripts/verify.sh`: fast check on every edit, full suite at Stop |
-| 6 | **Policy** | Dangerous actions are denied outright, so nothing depends on a prompt being answered. A human runs them with the `!` prefix. | `settings.json` allow/deny; the guard protects secrets, the harness itself and `.claude/protected-paths` |
+| 6 | **Policy** | Dangerous actions are denied outright, so nothing depends on a prompt being answered. A human runs them with the `!` prefix. | `settings.json` allow/deny; the guards protect secrets, the harness itself and `.claude/protected-paths`, and `guard-bash.sh` catches denied git forms |
 | 7 | **Traces** | Every finished task leaves an audit record, and every failure becomes infrastructure. | receipts and `lessons.md` |
 
 ## Hooks in detail
 
 | Hook | Event | Blocks when | Exit codes |
 |---|---|---|---|
-| `guard-write.sh` | PreToolUse on Edit/Write/MultiEdit | hook input it can't parse; secrets or `.git` internals; local permission file; harness files (unless maintainer mode); edits on `main`, `master` or a detached HEAD; files outside the active contract; danger zones not named in the contract | 2 = blocked (reason goes to Claude), 0 = allowed |
-| `post-edit-check.sh` | PostToolUse on Edit/Write/MultiEdit | `verify.sh --fast <file>` fails (format, lint, syntax of that one file) | 2 = error sent back to Claude to fix now |
+| `guard-write.sh` | PreToolUse on Edit/Write/MultiEdit/NotebookEdit | hook input it can't parse; git missing or failing; secrets or `.git` internals; a whole repository; local permission file; harness files (unless maintainer mode); edits on `main`, `master` or a detached HEAD; a contract that isn't approved; files outside the active contract; danger zones not named in the contract | 2 = blocked (reason goes to Claude), 0 = allowed |
+| `guard-bash.sh` | PreToolUse on Bash (timeout 30 s) | the same write policy for the targets of known shell commands and redirects; known commands reading secrets; `contract-approve.sh`; `git push`, `git reset`, `git add -f` in any position and `git config` keys that run code; for the reviewer role, anything off its allowlist | 2 = blocked, 0 = allowed. What it can't resolve passes and is logged to `.agent/state/guard-bash.log` |
+| `post-edit-check.sh` | PostToolUse on Edit/Write/MultiEdit/NotebookEdit | `verify.sh --fast <file>` fails (format, lint, syntax of that one file) | 2 = error sent back to Claude to fix now |
 | `stop-gate.sh` | Stop | branch has changes and `verify.sh` fails; or `verify.sh` passes and the active task has no receipt | 2 = "keep working", at most 3 stops in a row; 0 = allowed |
 
 `.agent/` is always writable, also on `main`, so `/task` can write a contract before the
 worktree exists.
 
-**What the guard protects.** It resolves symlinks first, then checks the real path:
+**What the guards protect.** Both run the same write policy (`path_policy` in `_lib.sh`).
+`guard-write.sh` applies it to the path of an Edit, Write or NotebookEdit. `guard-bash.sh` lexes
+the command and applies it to the targets of commands it knows (redirects, `tee`, `cp`, `mv`,
+`sed -i`, `tar`, `unzip`, `rsync`, `find -delete` and others). It is best effort: interpreter
+one-liners, variables and globs pass and are logged. See [SECURITY.md](../SECURITY.md). The
+policy resolves symlinks first, then checks the real path:
 
 - **Git internals:** any `.git` file or directory. This check runs before anything else.
-- **Secrets**, also in maintainer mode: `.env`, `.env.*`, `.npmrc`, `.netrc`, `id_rsa*`, `*.pem`,
+- **Whole repositories:** a directory that holds a `.git`, or holds the repo you are in, also in
+  maintainer mode. `git restore .`, `find . -delete` and a bare `tar -x` or `unzip` at the root
+  block; name the paths inside instead.
+- **Secrets**, also in maintainer mode, and for known shell commands that read them (a committed
+  `.env.example`, `.env.sample` or `.env.template` can be read, not written): `.env`, `.env.*`, `.npmrc`, `.netrc`, `id_rsa*`, `*.pem`,
   `*.key`, `*.p12` and `*.pfx` at any depth, and everything under a top-level `secrets/`.
 - **Local permissions**, also in maintainer mode: `.claude/settings.local.json`.
-- **Harness files**, unless in maintainer mode: `.claude/hooks/*`, `.claude/settings.json`,
-  `.claude/protected-paths`, `.claude/agents/*`, `.claude/skills/*`, `.claude/commands/*`,
-  `scripts/verify.sh`, `scripts/herdr-sub.sh` and `tests/harness/*`.
+- **Harness files**, unless in maintainer mode: `CLAUDE.md`, every file directly under `.claude/`
+  (`settings.json`, `protected-paths` and the rest), `.claude/rules/*`, `.claude/hooks/*`,
+  `.claude/agents/*`, `.claude/skills/*`, `.claude/commands/*`, `scripts/verify.sh`,
+  `scripts/herdr-sub.sh`, `scripts/harness-init.sh`, `scripts/contract-approve.sh` and
+  `tests/harness/*`.
+- **Unapproved contracts**, also in maintainer mode: on a `task/<id>` branch, or with an active
+  task, edits outside `.agent/` block until `scripts/contract-approve.sh <id>` has recorded the
+  contract's hash, and again after any edit to it. Only a human runs that script: both guards
+  and `settings.json` refuse it. Run it with `! scripts/contract-approve.sh <id>`, or in a plain
+  terminal if that is refused.
 
-The guard fails closed: hook input it can't parse (malformed, or no `jq` and no working `python3`)
-blocks the write. It has one known fail-open. It finds the repo with `git`, so if `git` is missing
-every path looks like it's outside a repo, only the `.git` check runs, and the write is allowed.
-Outside a git repo there is nothing to guard, so that case is allowed on purpose.
+Both guards fail closed: hook input they can't parse (malformed, or no `jq` and no working
+`python3`) blocks, and so does `git` missing or failing, because then a path can't be placed in
+a repo. Outside a git repo there is nothing to guard, so that case is allowed on purpose. The
+Bash guard's limits (a command it can't lex, or that is too big) pass and log, except for the
+reviewer role, which blocks. A hook that outlasts its timeout isn't a block: Claude Code lets the
+command run.
 
 **How the Stop gate decides.** Subagent sessions (`HARNESS_ROLE` set) skip it, and so does a
 branch with no changes against `main` outside `.agent/`. Otherwise it runs `verify.sh`, with a
@@ -119,15 +143,16 @@ The counts live in `.agent/state/stop-blocks-<session_id>` and
 
 ## Harness files are human-owned
 
-The guard blocks Claude from editing hooks, `settings.json`, `protected-paths`, agents, skills,
-slash commands, `verify.sh`, `herdr-sub.sh` and the self-test in `tests/harness/`. Claude proposes
+The guards block Claude from editing `CLAUDE.md`, rules, hooks, `settings.json` and the other
+files directly under `.claude/`, agents, skills, slash commands, `verify.sh`, `herdr-sub.sh`,
+`harness-init.sh`, `contract-approve.sh` and the self-test in `tests/harness/`. Claude proposes
 a change and you apply it. This is deliberate: an agent that can rewrite its own sensors has no
 sensors.
 
 **Maintainer mode** is only for developing this boilerplate itself. Start Claude with
 `HARNESS_MAINTAINER=1 claude` from inside a task worktree, and the guard allows harness edits.
-Secrets, `.git` internals, `.claude/settings.local.json`, main-branch isolation and contract scope
-stay enforced.
+Secrets, `.git` internals, whole repositories, `.claude/settings.local.json`, main-branch isolation,
+contract scope and contract approval stay enforced.
 With no project sensors configured, `verify.sh` then runs `tests/harness/run.sh` instead. Don't
 use maintainer mode in a normal project.
 
