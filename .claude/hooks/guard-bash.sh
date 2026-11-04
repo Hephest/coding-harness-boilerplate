@@ -763,6 +763,60 @@ patch_target() {
   write_check "$p"
 }
 
+# ---------------- reviewer role ----------------
+# The reviewer may run scripts/verify.sh and read-only git, piped into head, tail, grep or wc. This is
+# an allowlist on top of everything else here, and it fails closed: unlike the general guard, a
+# command it can't lex or afford to lex blocks. Any reviewer signal restricts, so if agent_type and
+# HARNESS_ROLE disagree the stricter reading wins.
+REVIEWER=0
+
+# reviewer_role : sets REVIEWER from the hook's agent_type and from HARNESS_ROLE.
+reviewer_role() {
+  local t r
+  t="$(json_get '.agent_type' 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  r="$(printf '%s' "${HARNESS_ROLE:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$t$r" in *reviewer*) REVIEWER=1 ;; esac
+}
+
+# reviewer_check <argv...> : blocks unless this simple command is on the reviewer's list. Runs on the
+# raw argv, before wrappers and assignments are peeled: `env`, `FOO=1 git diff` and `nice` all block.
+reviewer_check() {
+  local a sub name="${1##*/}" opt
+  for a in "$@"; do
+    # A word only the shell can expand could be anything, so it can't be on a list.
+    case "$a" in *'$'*|*'`'*) block "reviewer: '$a' holds a shell expansion, so it can't be checked." ;; esac
+  done
+  case "$1" in
+    scripts/verify.sh|./scripts/verify.sh) return 0 ;;
+    head|tail|grep|wc) return 0 ;;     # operands still go through the read policy below
+    git) ;;
+    *) block "reviewer: '$name' is not allowed. Only scripts/verify.sh and git diff|log|show|status, piped into head, tail, grep or wc." ;;
+  esac
+  # No option before the subcommand: -c, -C, --git-dir and --exec-path all change what git runs on.
+  sub="${2:-}"
+  case "$sub" in
+    diff|log|show|status) ;;
+    *) block "reviewer: 'git ${sub:-}' is not allowed. Only git diff, log, show and status." ;;
+  esac
+  shift 2
+  for a in "$@"; do
+    [ "$a" = -- ] && break
+    case "$a" in
+      --*) opt="${a%%=*}"
+           # git takes any unique prefix of a long flag, so --out is --output.
+           if [ ${#opt} -ge 3 ]; then
+             case "--output" in "$opt"*) opt=bad ;; esac
+             case "--ext-diff" in "$opt"*) opt=bad ;; esac
+             case "--textconv" in "$opt"*) opt=bad ;; esac
+             case "--no-index" in "$opt"*) opt=bad ;; esac
+             case "--help" in "$opt"*) opt=bad ;; esac
+           fi
+           [ "$opt" = bad ] && block "reviewer: 'git $sub $a' can write files or run a program. Not allowed." ;;
+    esac
+  done
+  return 0
+}
+
 # ---------------- one simple command ----------------
 
 # check_simple <argv...> : every simple command comes through here, with quotes removed. Peels what
@@ -770,6 +824,7 @@ patch_target() {
 # the basename of argv[0]. Anything not listed is none of our business.
 check_simple() {
   local name vals
+  if [ "$REVIEWER" = 1 ]; then [ $# -gt 0 ] && reviewer_check "$@"; fi
   while [ $# -gt 0 ]; do
     case "$1" in
       if|then|elif|else|do|while|until|'!'|'{'|'}'|fi|done|esac) shift; continue ;;
@@ -829,6 +884,13 @@ check_simple() {
 
 # check_redirect <op> <target>
 check_redirect() {
+  if [ "$REVIEWER" = 1 ]; then
+    # Descriptor copies (2>&1) and the null device are harmless; any other redirect is a file.
+    case "$1" in
+      '<&'|'>&') case "$2" in *[!0-9-]*) block "reviewer: redirects are not allowed." ;; esac ;;
+      *) [ "$2" = /dev/null ] || block "reviewer: redirects are not allowed." ;;
+    esac
+  fi
   case "$1" in
     '<') read_check "$2" ;;
     '<>') read_check "$2"; write_check "$2" ;;
@@ -850,6 +912,9 @@ S=""; I=0; N=0; DEPTH=0
 lex_string() {
   local S="$1" I=0 N=${#1}
   lex_list ""
+  if [ "$REVIEWER" = 1 ] && { [ "$OVER" = 1 ] || [ "$LEX_BAD" = 1 ]; }; then
+    block "reviewer: this command can't be fully read (unterminated quote or paren, or over the limit), so it isn't run."
+  fi
   if [ "$OVER" = 1 ]; then NOTES=1; note "unlexable: over budget"
   elif [ "$LEX_BAD" = 1 ]; then LEX_BAD=0; note "unlexable"
   fi
@@ -942,6 +1007,10 @@ start_redirect() {
       *[!0-9]*) end_word ;;
       *) w=""; has=0 ;;
     esac
+  fi
+  # A heredoc body is skipped as text, never lexed, so for the reviewer it is a hole.
+  if [ "$REVIEWER" = 1 ]; then
+    case "${S:I:2}" in '<<') block "reviewer: heredocs and here-strings are not allowed." ;; esac
   fi
   case "${S:I:3}" in
     '<<<'|'<<-') pend="${S:I:3}"; I=$((I + 3)); return ;;
@@ -1100,7 +1169,13 @@ read_backtick() {
 
 # ---------------- main ----------------
 
-[ -z "$HOOK_INPUT" ] && exit 0
+if [ -z "$HOOK_INPUT" ]; then
+  # Nothing to check, but the reviewer role fails closed.
+  case "$(printf '%s' "${HARNESS_ROLE:-}" | tr '[:upper:]' '[:lower:]')" in
+    *reviewer*) block "reviewer: no hook input, so this command can't be checked." ;;
+  esac
+  exit 0
+fi
 
 # Fail closed: input we can't read is a command we can't check.
 if ! CMD="$(json_get '.tool_input.command')"; then
@@ -1108,6 +1183,7 @@ if ! CMD="$(json_get '.tool_input.command')"; then
 fi
 [ -n "$CMD" ] || block "the hook input names no command, so it can't be checked."
 CWD="$(json_get '.cwd')"; CWD="${CWD:-$PWD}"
+reviewer_role
 
 # Bytes, not characters: ${S:I:1} would count multibyte characters from the start on every call.
 LC_ALL=C
