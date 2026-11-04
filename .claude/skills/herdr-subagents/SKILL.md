@@ -56,6 +56,9 @@ Options for `run` / `start`:
   Use it when the user wants to watch or steer the subagent. Default is headless (`claude -p`).
 - `--keep`: leave the tab open afterwards, for the user to inspect.
 
+`wait` takes only `--timeout MS`; `--interactive` and `--keep` are set when the run starts. `list`
+and `close <run-id>` take no options.
+
 `@file` passes a file's contents as the prompt (contracts, plans, diffs saved to a file).
 
 ## Reading results
