@@ -79,15 +79,29 @@ is_secret() {
   return 1
 }
 
-# path_policy <path> <cwd> : POLICY + CONTRACT invariants for one write. Every way of writing a file
-# (Edit, Write, a shell redirect) comes through here. Relative paths resolve against <cwd>, the
-# hook's .cwd, never $PWD. Returns 0 = allowed, 2 = blocked with the reason on stderr.
+# is_harness <rel> : true for a repo-relative path the user owns, or a directory that holds one.
+# Files directly under .claude all configure the harness. Its other subdirectories are tool state.
+is_harness() {
+  case "$1" in
+    CLAUDE.md|scripts|tests|.claude/rules/*|.claude/hooks/*|.claude/agents/*|.claude/skills/*|.claude/commands/*|scripts/verify.sh|scripts/herdr-sub.sh|scripts/harness-init.sh|tests/harness/*) return 0 ;;
+    .claude/*/*) return 1 ;;
+    .claude/*) return 0 ;;
+  esac
+  return 1
+}
+
+# path_policy <path> <cwd> [parent] : POLICY + CONTRACT invariants for one write. Every way of
+# writing a file (Edit, Write, a shell redirect) comes through here. Relative paths resolve against
+# <cwd>, the hook's .cwd, never $PWD. With "parent", stops after the protected paths: for a
+# directory that something lands in, where the branch and the contract judge the file, not the
+# directory. Returns 0 = allowed, 2 = blocked with the reason on stderr.
 path_policy() {
-  local file="$1" cwd="${2:-$PWD}" dir root rel branch task zone g contract targets glob zprefix gprefix
+  local file="$1" cwd="${2:-$PWD}" scope="${3:-}" dir root rel branch task zone g contract targets glob zprefix gprefix
   case "$file" in /*) ;; *) file="$cwd/$file" ;; esac
 
   # Canonical form, so a path through a symlink gets the same checks as the real one.
-  file="$(canon_path "$file")"
+  # canon_path prints nothing for /.
+  file="$(canon_path "$file")"; file="${file:-/}"
 
   # 0. Git internals. Matched on the full path: inside .git there is no work tree, so repo_root
   #    finds nothing, and a worktree's .git is a file that points into the main repo's .git.
@@ -95,6 +109,15 @@ path_policy() {
     */.git|*/.git/*)
       echo "BLOCKED: '$file' is a protected path (git internals)." >&2; return 2 ;;
   esac
+
+  # 0b. A directory that holds a .git, or holds the repo we're working in, holds everything below
+  #     it, secrets included. Holds in maintainer mode, like .git itself.
+  if [ -d "$file" ]; then
+    root="$(repo_root "$cwd")"
+    if [ -e "$file/.git" ] || { [ -n "$root" ] && case "$root/" in "${file%/}"/*) true ;; *) false ;; esac; }; then
+      echo "BLOCKED: '$file' holds a whole repository, .git included. Name the paths inside it instead." >&2; return 2
+    fi
+  fi
 
   dir="$(dirname "$file")"; while [ ! -d "$dir" ]; do dir="$(dirname "$dir")"; done
   if ! root="$(repo_root_checked "$dir")"; then
@@ -105,8 +128,9 @@ path_policy() {
   rel="${file#"$root"/}"
 
   # 1. Blast radius: never touch secrets or local permission overrides, at any depth in the tree.
-  #    These stay blocked even in maintainer mode.
-  if is_secret "$rel"; then
+  #    These stay blocked even in maintainer mode. The /_ is what's under a directory: a parent of
+  #    a protected path counts as that path, so `mv secrets x` is no way around it.
+  if is_secret "$rel" || is_secret "$rel/_"; then
     echo "BLOCKED: '$rel' is a protected path (secrets)." >&2; return 2
   fi
   case "$rel" in
@@ -118,12 +142,12 @@ path_policy() {
   #     start Claude with HARNESS_MAINTAINER=1 to edit them (contract scope still applies below).
   #     Root CLAUDE.md and .claude/rules/* shape behaviour as much as a hook does. A module's own
   #     CLAUDE.md stays writable, and .agent/lessons.md too: /finish appends to it.
-  case "$rel" in
-    CLAUDE.md|.claude/rules/*|.claude/hooks/*|.claude/settings.json|.claude/protected-paths|.claude/agents/*|.claude/skills/*|.claude/commands/*|scripts/verify.sh|scripts/herdr-sub.sh|scripts/harness-init.sh|tests/harness/*)
-      if [ "${HARNESS_MAINTAINER:-}" != 1 ]; then
-        echo "BLOCKED: '$rel' is harness infrastructure. Propose the change to the user instead of editing it." >&2; return 2
-      fi ;;
-  esac
+  if is_harness "$rel" || is_harness "$rel/_"; then
+    if [ "${HARNESS_MAINTAINER:-}" != 1 ]; then
+      echo "BLOCKED: '$rel' is harness infrastructure. Propose the change to the user instead of editing it." >&2; return 2
+    fi
+  fi
+  [ "$scope" = parent ] && return 0
 
   # 2. Task bookkeeping (contracts, receipts, lessons) is always writable, also on main,
   #    so /task can write a contract before the worktree exists.

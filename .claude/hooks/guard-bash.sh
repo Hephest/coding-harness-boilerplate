@@ -93,6 +93,27 @@ write_check() {
   path_policy "$REPLY" "$CWD" || exit 2
 }
 
+# tree_check <word> : a write that also takes what's under the word, when it is a directory. The
+# parent rule in the policy covers the protected paths, this covers danger zones.
+tree_check() {
+  write_check "$1"
+  if abs_word "$1" && [ -d "$REPLY" ]; then write_check "$1/_"; fi
+}
+
+# parent_check <word> : the word is a directory that something lands in, and write_check is
+# judging the file. Only the protected paths apply to the directory itself.
+parent_check() {
+  resolve_word "$1" || return 0
+  spend_check || return 0
+  path_policy "$REPLY" "$CWD" parent || exit 2
+}
+
+# into_check <word> : files with names we can't see land under the word.
+into_check() {
+  parent_check "$1"
+  write_check "${1%/}/_"
+}
+
 # read_check <word> : narrower than the write policy. Only the secrets list applies, the committed
 # templates are fine, and it holds outside a repo too: a key is a key wherever it lies.
 read_check() {
@@ -219,18 +240,29 @@ cmd_pattern() {
   for a in "${POS[@]}"; do read_check "$a"; done
 }
 
+# awk: reads its files. gawk writes them too with -i inplace.
 cmd_awk() {
-  local a program_given=0
-  scan_opts "fvF" "$@"
-  for a in "${OPTS[@]}"; do case "$a" in -f*) program_given=1 ;; esac; done
+  local a program_given=0 inplace=0
+  LONG_VALS="--include"
+  scan_opts "fvFi" "$@"
+  LONG_VALS=""
+  for a in "${OPTS[@]}"; do
+    case "$a" in
+      -f*) program_given=1 ;;
+      -iinplace*|--include=inplace*) inplace=1 ;;
+    esac
+  done
   [ "$program_given" = 1 ] || POS=("${POS[@]:1}")
-  for a in "${POS[@]}"; do read_check "$a"; done
+  for a in "${POS[@]}"; do
+    read_check "$a"
+    [ "$inplace" = 1 ] && write_check "$a"
+  done
 }
 
 # cmd_copy <argv...> : cp, mv, ln and install. Sources may be secrets, the destination is a write,
 # and mv's source is a write too: it disappears from where it was.
 cmd_copy() {
-  local tool="${1##*/}" vals="tS" dest="" into=0 notdir=0 n s o
+  local tool="${1##*/}" vals="tS" dest="" into=0 notdir=0 deep=0 n s o
   local -a srcs=()
   shift
   [ "$tool" = install ] && vals="tSmogfB"
@@ -240,6 +272,7 @@ cmd_copy() {
       -t*) dest="${o#-t}"; into=1 ;;
       --target-directory=*) dest="${o#*=}"; into=1 ;;
       -T|--no-target-directory) notdir=1 ;;
+      -r|-R|-a|--recursive|--archive) [ "$tool" = cp ] && deep=1 ;;
       -d|--directory) [ "$tool" = install ] && { for s in "${POS[@]}"; do write_check "$s"; done; return; } ;;
     esac
   done
@@ -255,14 +288,138 @@ cmd_copy() {
 
   for s in "${srcs[@]}"; do
     read_check "$s"
-    if [ "$tool" = mv ]; then
-      write_check "$s"
-      # A directory's own path isn't on any list, what's under it is: `mv .claude/hooks x`.
-      if abs_word "$s" && [ -d "$REPLY" ]; then write_check "$s/_"; fi
+    [ "$tool" = mv ] && tree_check "$s"
+    s="${s%"${s##*[!/]}"}"
+    if [ "$into" = 1 ]; then
+      write_check "${dest%/}/${s##*/}"
+      # A tree can merge into the directory: on BSD, `cp -R x/ scripts` lands on scripts/verify.sh.
+      if [ "$deep" = 1 ] || { abs_word "$s" && [ -d "$REPLY" ]; }; then parent_check "$dest"; fi
+    else
+      write_check "$dest"
     fi
-    s="${s%/}"
-    if [ "$into" = 1 ]; then write_check "${dest%/}/${s##*/}"; else write_check "$dest"; fi
   done
+}
+
+# cmd_delete <argv...> : rm, rmdir, unlink. Every operand goes, and what's under it.
+cmd_delete() {
+  local a; shift
+  scan_opts "" "$@"
+  for a in "${POS[@]}"; do tree_check "$a"; done
+}
+
+# chmod's mode can look like a flag: -x and -w are modes, -R and -v are flags.
+cmd_chmod() {
+  local a mode=0; shift
+  while [ $# -gt 0 ]; do
+    a="$1"; shift
+    case "$a" in
+      --reference=*) mode=1 ;;
+      --*) ;;
+      -*[!RfvchHLP]*) if [ "$mode" = 0 ]; then mode=1; fi ;;
+      -?*) ;;
+      *) if [ "$mode" = 0 ]; then mode=1; else tree_check "$a"; fi ;;
+    esac
+  done
+}
+
+# chown and chgrp: the first operand is the owner, unless a flag named it.
+cmd_chown() {
+  local a; shift
+  scan_opts "" "$@"
+  for a in "${OPTS[@]}"; do
+    case "$a" in --reference=*) POS=("" "${POS[@]}") ;; esac
+  done
+  for a in "${POS[@]:1}"; do tree_check "$a"; done
+}
+
+# find: only deleting is ours, with -delete or a known deleter. A shell in -exec isn't followed.
+cmd_find() {
+  local a gone=0
+  local -a roots=()
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -[HLPEXdsx]|-O*) shift ;;
+      -f|-D) [ "$1" = -f ] && roots+=("$2"); shift; [ $# -gt 0 ] && shift ;;
+      *) break ;;
+    esac
+  done
+  while [ $# -gt 0 ]; do
+    case "$1" in -*|'('|'!') break ;; esac
+    roots+=("$1"); shift
+  done
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -delete) gone=1 ;;
+      -exec|-execdir|-ok|-okdir)
+        case "${2##*/}" in rm|rmdir|unlink|chmod|chown|chgrp) gone=1 ;; esac ;;
+    esac
+    shift
+  done
+  [ "$gone" = 1 ] || return 0
+  [ ${#roots[@]} -gt 0 ] || roots=(.)
+  for a in "${roots[@]}"; do tree_check "$a"; done
+}
+
+# rsync and ditto: the last operand takes what the others hold, under names we can't see.
+cmd_sync() {
+  local a n drain=0; shift
+  LONG_VALS="--rsh --exclude --include --filter --files-from --exclude-from --include-from"
+  scan_opts "" "$@"
+  LONG_VALS=""
+  for a in "${OPTS[@]}"; do
+    case "$a" in --remove-source-files) drain=1 ;; esac
+  done
+  n=${#POS[@]}
+  [ "$n" -gt 1 ] || return 0
+  for a in "${POS[@]:0:n-1}"; do
+    read_check "$a"
+    [ "$drain" = 1 ] && tree_check "$a"
+  done
+  into_check "${POS[n-1]}"
+}
+
+# tar: extracting lands under -C, or here. Creating reads the operands and writes the archive.
+cmd_tar() {
+  local a mode="" stdout=0 archive=""
+  local -a dirs=()
+  shift
+  case "$1" in -*|'') ;; *) set -- "-$1" "${@:2}" ;; esac   # `tar xf a.tar`
+  LONG_VALS="--file --directory --files-from --exclude-from --exclude --use-compress-program --strip-components"
+  scan_opts "fCTXbI" "$@"
+  LONG_VALS=""
+  for a in "${OPTS[@]}"; do
+    case "$a" in
+      -x|--extract|--get) mode=x ;;
+      -c|-r|-u|--create|--append|--update) mode=c ;;
+      -O|--to-stdout) stdout=1 ;;
+      -f*) archive="${a#-f}" ;;
+      --file=*) archive="${a#*=}" ;;
+      -C*) dirs+=("${a#-C}") ;;
+      --dir*=*) dirs+=("${a#*=}") ;;
+    esac
+  done
+  case "$mode" in
+    x) read_check "$archive"
+       [ "$stdout" = 1 ] && return 0
+       [ ${#dirs[@]} -gt 0 ] || dirs=(.)
+       for a in "${dirs[@]}"; do into_check "$a"; done ;;
+    c) write_check "$archive"
+       for a in "${POS[@]}"; do read_check "$a"; done ;;
+  esac
+}
+
+# unzip: lands under -d, or here. The listing and printing modes write nothing.
+cmd_unzip() {
+  local a dest=.; shift
+  scan_opts "d" "$@"
+  for a in "${OPTS[@]}"; do
+    case "$a" in
+      -d*) dest="${a#-d}" ;;
+      -l|-p|-t|-v|-z|-Z) return 0 ;;
+    esac
+  done
+  into_check "$dest"
 }
 
 cmd_dd() {
@@ -325,7 +482,7 @@ cmd_sed() {
   done
 }
 
-# perl: only -i is ours. Reading through an interpreter is out of scope.
+# perl and ruby: only -i is ours. Reading through an interpreter is out of scope.
 cmd_perl() {
   local a rest l script_given=0 inplace=0
   local -a files=()
@@ -378,12 +535,14 @@ inspect_string() {
 # ---------------- git ----------------
 
 cmd_git() {
-  local CWD="$CWD" CWD_OK="$CWD_OK" sub
+  local CWD="$CWD" CWD_OK="$CWD_OK" sub a
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
       -C) set_cwd "$2"; shift; [ $# -gt 0 ] && shift ;;
-      -c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix|--attr-source)
+      -c|--config-env) git_config_key "${2%%=*}"; shift; [ $# -gt 0 ] && shift ;;
+      --config-env=*) a="${1#*=}"; git_config_key "${a%%=*}"; shift ;;
+      --git-dir|--work-tree|--namespace|--super-prefix|--attr-source)
         shift; [ $# -gt 0 ] && shift ;;
       -*) shift ;;
       *) break ;;
@@ -397,6 +556,10 @@ cmd_git() {
     apply) git_apply "$@" ;;
     checkout) git_checkout "$@" ;;
     restore) git_restore "$@" ;;
+    rm) git_rm "$@" ;;
+    mv) cmd_copy mv "$@" ;;
+    show|diff|cat-file) git_read "$@" ;;
+    config) git_config "$@" ;;
     *'$'*|*'`'*) note "unresolved git subcommand: $sub" ;;
   esac
 }
@@ -422,7 +585,7 @@ git_checkout() {
   while [ $# -gt 0 ]; do
     a="$1"; shift
     case "$a" in
-      --) for a in "$@"; do write_check "$a"; done; return ;;
+      --) for a in "$@"; do git_path_check "$a"; done; return ;;
       -b|-B|--orphan|--detach|-d) return ;;
       -*) ;;
       *) pos+=("$a") ;;
@@ -430,8 +593,8 @@ git_checkout() {
   done
   # No `--`: the first word is a branch or a tree-ish unless it's on disk, the rest are paths.
   for a in "${pos[@]}"; do
-    if [ "$i" -gt 0 ]; then write_check "$a"
-    elif abs_word "$a" && [ -e "$REPLY" ]; then write_check "$a"
+    if [ "$i" -gt 0 ]; then git_path_check "$a"
+    elif abs_word "$a" && [ -e "$REPLY" ]; then git_path_check "$a"
     fi
     i=$((i + 1))
   done
@@ -449,7 +612,99 @@ git_restore() {
     esac
   done
   [ "$staged" = 1 ] && [ "$worktree" = 0 ] && return 0   # the index only, no file changes
-  for a in "${POS[@]}"; do write_check "$a"; done
+  for a in "${POS[@]}"; do git_path_check "$a"; done
+}
+
+# git_rm: --cached leaves the file, but the next commit removes it all the same.
+git_rm() {
+  local a
+  scan_opts "" "$@"
+  for a in "${POS[@]}"; do git_path_check "$a"; done
+}
+
+# git_path_check <pathspec> : :/x and :(top)x count from the top of the repo. Other magic can't be
+# resolved here.
+git_path_check() {
+  local p root=""
+  case "$1" in
+    :/*) p="${1#:/}" ;;
+    ':(top)'*) p="${1#':(top)'}" ;;
+    :*) note "unresolved pathspec: $1"; return 0 ;;
+    *) tree_check "$1"; return 0 ;;
+  esac
+  if [ "$CWD_OK" = 1 ]; then root="$(repo_root "$CWD")"; fi
+  if [ -z "$root" ]; then note "unresolved pathspec: $1"; return 0; fi
+  tree_check "$root/$p"
+}
+
+# git_read <args...> : show, diff and cat-file print files. An operand is a path, or <ref>:<path>
+# for a file as committed, which needs no copy on disk. git diff outside the work tree is
+# --no-index even without the flag, so a plain path is a read either way.
+git_read() {
+  local a
+  scan_opts "" "$@"
+  for a in "${OPTS[@]}"; do
+    case "$a" in --batch*) note "git cat-file from stdin" ;; esac
+  done
+  for a in "${POS[@]}"; do
+    case "$a" in *:*) git_blob_check "$a" ;; *) read_check "$a" ;; esac
+  done
+}
+
+# git_blob_check <ref>:<path> : the path counts from the top of the repo, unless it starts with ./
+# or ../. A path can hold a colon and so can a ref search, so both ways of splitting are checked.
+git_blob_check() {
+  local p root=""
+  if [ "$CWD_OK" = 1 ]; then root="$(repo_root "$CWD")"; fi
+  for p in "${1#*:}" "${1##*:}"; do
+    case "$p" in
+      ./*|../*) read_check "$p" ;;
+      *) read_check "${root:+$root/}$p" ;;
+    esac
+  done
+}
+
+# git_config_key <key> : these run a program, switch off the hooks, or pull in a file that does.
+# Keys ignore case. Whole sections count too, for --remove-section. Setting up .githooks is a
+# maintainer's job.
+git_config_key() {
+  [ "${HARNESS_MAINTAINER:-}" = 1 ] && return 0
+  local hit=0
+  shopt -s nocasematch
+  case "$1" in core|alias|alias.*|core.hookspath|core.fsmonitor|core.sshcommand|include.path|includeif.*) hit=1 ;; esac
+  shopt -u nocasematch
+  [ "$hit" = 0 ] || block "git config key '$1' can run code or skip the hooks. If it's needed, give the user the exact command to run with the ! prefix."
+}
+
+# git_config: a key alone, or a read flag, reads. A value, or a flag that changes things, writes.
+git_config() {
+  local a sets=0 file=""
+  LONG_VALS="--file --blob --default --type --comment"
+  scan_opts "f" "$@"
+  LONG_VALS=""
+  for a in "${OPTS[@]}"; do
+    case "$a" in
+      -f*) file="${a#-f}" ;;
+      --file=*) file="${a#*=}" ;;
+    esac
+  done
+  read_check "$file"
+  case "${POS[0]}" in
+    get|list) return 0 ;;
+    edit) note "git config edit"; return 0 ;;
+    set|unset|rename-section|remove-section) sets=1; POS=("${POS[@]:1}") ;;
+  esac
+  [ ${#POS[@]} -gt 1 ] && sets=1
+  for a in "${OPTS[@]}"; do
+    case "$a" in
+      --get*|--list|-l) return 0 ;;
+      -e|--edit) note "git config edit"; return 0 ;;
+      --unset*|--add|--replace-all|--rename-section|--remove-section) sets=1 ;;
+    esac
+  done
+  [ "$sets" = 1 ] || return 0
+  git_config_key "${POS[0]}"
+  write_check "$file"
 }
 
 # git_apply: the targets are inside the patch. Paths in a git patch count from the top of the repo.
@@ -546,7 +801,14 @@ check_simple() {
     cp|mv|ln|install) cmd_copy "$@" ;;
     dd) cmd_dd "$@" ;;
     sed|gsed) cmd_sed "$@" ;;
-    perl) cmd_perl "$@" ;;
+    perl|ruby) cmd_perl "$@" ;;
+    rm|rmdir|unlink) cmd_delete "$@" ;;
+    chmod) cmd_chmod "$@" ;;
+    chown|chgrp) cmd_chown "$@" ;;
+    find) cmd_find "$@" ;;
+    rsync|ditto) cmd_sync "$@" ;;
+    tar|gtar|bsdtar) cmd_tar "$@" ;;
+    unzip) cmd_unzip "$@" ;;
     grep|egrep|fgrep) shift; cmd_pattern "efmABCdD" "$@" ;;
     rg) shift; cmd_pattern "efgtTmABCjMrE" "$@" ;;
     awk|gawk|mawk|nawk) shift; cmd_awk "$@" ;;
