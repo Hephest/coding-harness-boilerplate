@@ -114,6 +114,14 @@ into_check() {
   write_check "${1%/}/_"
 }
 
+# no_approve <word> : a contract is approved by a human, so the agent can't run the script. Holds
+# in maintainer mode too: that mode is for editing the harness, not for signing off work.
+no_approve() {
+  case "${1##*/}" in
+    contract-approve.sh) block "only the user approves a contract. Ask them to run it, with the ! prefix or in a plain terminal." ;;
+  esac
+}
+
 # read_check <word> : narrower than the write policy. Only the secrets list applies, the committed
 # templates are fine, and it holds outside a repo too: a key is a key wherever it lies.
 read_check() {
@@ -519,7 +527,7 @@ cmd_shell() {
       --*) ;;
       -*c*) run=1 ;;
       [-+]*) ;;
-      *) [ "$run" = 1 ] && inspect_string "$a"
+      *) if [ "$run" = 1 ]; then inspect_string "$a"; else no_approve "$a"; fi
          return ;;
     esac
   done
@@ -789,6 +797,7 @@ check_simple() {
     *'$'*|*'`'*) note "unresolved command: $1"; return 0 ;;
   esac
   name="${1##*/}"
+  no_approve "$1"
   case "$name" in
     cd|pushd) cmd_cd "$@" ;;
     popd) CWD_OK=0 ;;
@@ -812,7 +821,8 @@ check_simple() {
     grep|egrep|fgrep) shift; cmd_pattern "efmABCdD" "$@" ;;
     rg) shift; cmd_pattern "efgtTmABCjMrE" "$@" ;;
     awk|gawk|mawk|nawk) shift; cmd_awk "$@" ;;
-    cat|tac|nl|head|tail|less|more|bat|od|xxd|hexdump|strings|base64|base32|sort|uniq|cut|paste|fold|rev|diff|cmp|comm|source|.)
+    source|.) no_approve "$2"; shift; cmd_reader "$@" ;;
+    cat|tac|nl|head|tail|less|more|bat|od|xxd|hexdump|strings|base64|base32|sort|uniq|cut|paste|fold|rev|diff|cmp|comm)
       shift; cmd_reader "$@" ;;
   esac
 }

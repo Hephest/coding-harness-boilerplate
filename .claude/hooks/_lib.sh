@@ -83,11 +83,82 @@ is_secret() {
 # Files directly under .claude all configure the harness. Its other subdirectories are tool state.
 is_harness() {
   case "$1" in
-    CLAUDE.md|scripts|tests|.claude/rules/*|.claude/hooks/*|.claude/agents/*|.claude/skills/*|.claude/commands/*|scripts/verify.sh|scripts/herdr-sub.sh|scripts/harness-init.sh|tests/harness/*) return 0 ;;
+    CLAUDE.md|scripts|tests|.claude/rules/*|.claude/hooks/*|.claude/agents/*|.claude/skills/*|.claude/commands/*|scripts/verify.sh|scripts/herdr-sub.sh|scripts/harness-init.sh|scripts/contract-approve.sh|tests/harness/*) return 0 ;;
     .claude/*/*) return 1 ;;
     .claude/*) return 0 ;;
   esac
   return 1
+}
+
+# contract_targets <contract> : bullet lines under "## Target files", until the next heading.
+contract_targets() {
+  awk '/^## Target files/{f=1;next} /^## /{f=0} f && /^- /{sub(/^- +/,""); gsub(/`/,""); print}' "$1"
+}
+
+# sha256_of <file> : the hash, or non-zero when no tool can make one. Read from stdin, because
+# sha256sum escapes an awkward file name and marks the hash for it.
+sha256_of() {
+  local h=""
+  if command -v shasum >/dev/null 2>&1; then read -r h _ < <(shasum -a 256 < "$1")
+  elif command -v sha256sum >/dev/null 2>&1; then read -r h _ < <(sha256sum < "$1")
+  fi
+  [ -n "$h" ] && printf '%s\n' "$h"
+}
+
+# approval_file <root> <id> : where a contract's approved hash lives. Under the git common dir, so
+# every worktree shares it, and under .git, so both guards already protect it.
+approval_file() {
+  local common
+  common="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" && [ -n "$common" ] || return 1
+  case "$common" in /*) ;; *) common="$1/$common" ;; esac
+  printf '%s/harness/approved/%s.sha256\n' "$common" "$2"
+}
+
+# approval_hint <root> <id> : what to do about a blocked approval.
+approval_hint() {
+  echo "Show the user .agent/contracts/$2.md and ask them to run:" >&2
+  echo "  ! scripts/contract-approve.sh $2" >&2
+  echo "or, in a plain terminal:" >&2
+  echo "  cd $1 && scripts/contract-approve.sh $2" >&2
+  echo "Everything under .agent/ stays writable, so the contract can still be fixed." >&2
+}
+
+# approval_policy <root> <branch> : the contract for this work must be the one a human approved.
+# The id comes from the branch, so blanking active-task doesn't skip this. An approval outlives its
+# contract, so deleting the contract doesn't either. The contract is read from the checkout being
+# written to. One pass per hook run: the contract doesn't change while a command is being checked.
+approval_policy() {
+  local root="$1" branch="$2" id record contract want="" got
+  case "$branch" in
+    task/*) id="${branch#task/}" ;;
+    *) id="$(active_task "$root")" ;;
+  esac
+  [ -n "$id" ] || return 0
+  [ "${APPROVAL_PASSED:-}" = "$root:$id" ] && return 0
+  if ! record="$(approval_file "$root" "$id")"; then
+    echo "BLOCKED: git can't name its common dir here, so the contract for '$id' can't be checked." >&2
+    return 2
+  fi
+  contract="$root/.agent/contracts/$id.md"
+  [ -f "$contract" ] || [ -f "$record" ] || return 0
+  if [ ! -f "$contract" ]; then
+    echo "BLOCKED: '$id' was approved, but .agent/contracts/$id.md is missing here. Restore it." >&2
+    approval_hint "$root" "$id"; return 2
+  fi
+  if [ ! -f "$record" ]; then
+    echo "BLOCKED: the contract for '$id' isn't approved." >&2
+    approval_hint "$root" "$id"; return 2
+  fi
+  if ! got="$(sha256_of "$contract")"; then
+    echo "BLOCKED: neither shasum nor sha256sum is installed, so the sha256 of the contract for '$id' can't be checked." >&2
+    return 2
+  fi
+  IFS= read -r want < "$record"
+  if [ "$got" != "$want" ]; then
+    echo "BLOCKED: the contract for '$id' changed since it was approved." >&2
+    approval_hint "$root" "$id"; return 2
+  fi
+  APPROVAL_PASSED="$root:$id"
 }
 
 # path_policy <path> <cwd> [parent] : POLICY + CONTRACT invariants for one write. Every way of
@@ -161,6 +232,9 @@ path_policy() {
     return 2
   fi
 
+  # 3b. Approval: after the .agent/* exit above, so a blocked agent can still fix its contract.
+  approval_policy "$root" "$branch" || return 2
+
   # 4. Contract scope: if a task is active, only its target files may change.
   task="$(active_task "$root")"
 
@@ -182,8 +256,7 @@ path_policy() {
   contract="$root/.agent/contracts/$task.md"
   [ -f "$contract" ] || { echo "BLOCKED: active task '$task' has no contract at .agent/contracts/$task.md" >&2; return 2; }
 
-  # Target globs = bullet lines under "## Target files" until the next heading.
-  targets="$(awk '/^## Target files/{f=1;next} /^## /{f=0} f && /^- /{sub(/^- +/,""); gsub(/`/,""); print}' "$contract")"
+  targets="$(contract_targets "$contract")"
   while IFS= read -r glob; do
     [ -z "$glob" ] && continue
     # A danger-zone file only counts as listed if the glob is at least as specific as the zone

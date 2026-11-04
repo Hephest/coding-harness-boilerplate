@@ -25,7 +25,9 @@
       "Bash(git add --force:*)",
       "Bash(git push:*)",
       "Bash(git reset:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(scripts/contract-approve.sh:*)",
+      "Bash(./scripts/contract-approve.sh:*)"
     ]
   },
   "env": {
