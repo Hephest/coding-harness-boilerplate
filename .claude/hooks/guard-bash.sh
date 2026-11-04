@@ -72,7 +72,7 @@ resolve_word() {
   if [ ${#w} -gt "$MAX_PATH" ]; then note "target too long"; return 1; fi
   case "$w" in
     ''|-|/dev/null|/dev/stdout|/dev/stderr|/dev/fd/*) return 1 ;;
-    *'$'*|*'`'*|*'*'*|*'?'*|*'['*|*'{'*,*'}'*) note "unresolved target: $w"; return 1 ;;
+    *'$'*|*'`'*|*'*'*|*'?'*|*'['*|*'{'*,*'}'*|*'{'*..*'}'*) note "unresolved target: $w"; return 1 ;;
     '~'|'~/'*) w="${HOME:-}${w#'~'}" ;;
     '~'*) note "unresolved target: $w"; return 1 ;;
   esac
@@ -720,6 +720,8 @@ git_config_key() {
     core|alias|alias.*|core.hookspath|core.fsmonitor|core.sshcommand|include.path|includeif.*) hit=1 ;;
     core.pager|core.editor|diff.external|sequence.editor) hit=1 ;;
     filter|filter.*|credential|credential.*|gpg|gpg.*) hit=1 ;;
+    # A second dot names a driver, which runs a program. diff.renames and merge.ff run nothing.
+    diff.*.*|merge.*.*|difftool|difftool.*|mergetool|mergetool.*|pager|pager.*) hit=1 ;;
   esac
   shopt -u nocasematch
   [ "$hit" = 0 ] || block "git config key '$1' can run code or skip the hooks. If it's needed, give the user the exact command to run with the ! prefix."

@@ -24,6 +24,9 @@ Apply the full checklist in `.claude/skills/code-review/SKILL.md`. At minimum ch
 - New dependencies, secrets in code or logs
 
 Report each real problem as: severity · file:line · what breaks · how to trigger it.
+A finding that needs deliberate evasion by a hostile agent is a documentation item, not a blocker:
+SECURITY.md scopes the harness to a cooperative agent. Report it as a documentation item. It doesn't
+affect the verdict.
 End with one verdict line: `ACCEPT` or `REJECT: <failure class>`
 (failure class = context gap | tool gap | permission boundary | logic bug | scope creep).
 Do not rewrite the code. If nothing is wrong, say "No issues. ACCEPT" and stop.
