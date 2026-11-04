@@ -4,7 +4,7 @@
 # Rows are data and never run. Leaves the fixture as it found it.
 
 # rg_rows <expected-exit> <label> <text stderr must contain> : one command per line on stdin, all
-# from $wt. The text matters: on task/demo a write can also block for being outside the contract.
+# from $wt. The text matters: there a write can also block for being outside the contract.
 rg_rows() {
   local want="$1" label="$2" needle="$3" cmd
   while IFS= read -r cmd; do
@@ -76,23 +76,24 @@ EOF
 chmod +x "$stubgit/git"
 guard_raw 2 "review: one task id: no common dir fails closed" "$stubgit" "$(input "$rw/src/app.py")" "common dir"
 
-# --- Criterion 2: with no contract for the branch, active-task's contract must be approved too ---
+# --- Criterion 2, replaced by v02-task-branch: a task branch with no contract of its own blocks,
+# whatever active-task names. Same rows, new expectations. ---
 g "$fx" worktree add -q -b task/rgfree "$fx/.worktrees/rgfree" HEAD
 rf="$fx/.worktrees/rgfree"
 mkdir -p "$rf/.agent/state" "$rf/.agent/contracts"
 printf '# Contract: wide\n## Target files\n- src/*\n' > "$rf/.agent/contracts/wide.md"
-rg_write 0 "other branch: task branch, nothing to enforce" "$rf/src/other.py"
+rg_write 2 "other branch: task branch, nothing to enforce" "$rf/src/other.py" "contracts/rgfree.md doesn't exist"
 echo wide > "$rf/.agent/state/active-task"
-rg_write 2 "other branch: task branch without a contract, unapproved active-task" "$rf/src/other.py" "isn't approved"
-rg_shell 2 "other branch: same, shell" "$rf" 'echo x > src/other.py' "isn't approved"
+rg_write 2 "other branch: task branch without a contract, unapproved active-task" "$rf/src/other.py" "contracts/rgfree.md doesn't exist"
+rg_shell 2 "other branch: same, shell" "$rf" 'echo x > src/other.py' "contracts/rgfree.md doesn't exist"
 rg_write 0 "other branch: same, .agent stays open" "$rf/.agent/contracts/wide.md"
 ca_contract "$rf" narrow
 ca_approve "$rf" narrow
 echo narrow > "$rf/.agent/state/active-task"
-rg_write 0 "other branch: task branch, approved active-task, target" "$rf/src/app.py"
-rg_write 2 "other branch: task branch, approved active-task, outside" "$rf/src/other.py" "outside the contract for 'narrow'"
+rg_write 2 "other branch: task branch, approved active-task, target" "$rf/src/app.py" "contracts/rgfree.md doesn't exist"
+rg_write 2 "other branch: task branch, approved active-task, outside" "$rf/src/other.py" "contracts/rgfree.md doesn't exist"
 echo ghost > "$rf/.agent/state/active-task"
-rg_write 2 "other branch: task branch, active-task has no contract" "$rf/src/app.py" "no contract"
+rg_write 2 "other branch: task branch, active-task has no contract" "$rf/src/app.py" "contracts/rgfree.md doesn't exist"
 
 g "$fx" worktree add -q -b feature/rg "$fx/.worktrees/rgfeat" HEAD
 rc="$fx/.worktrees/rgfeat"

@@ -55,7 +55,9 @@ g "$fx" init -q
   || { echo "FAIL  fixture is not its own repo, refusing to continue"; exit 1; }
 g "$fx" symbolic-ref HEAD refs/heads/main
 g "$fx" add -A && g "$fx" commit -qm "fixture"
-g "$fx" worktree add -q -b task/demo "$fx/.worktrees/demo" HEAD
+# Off task/*: a task branch always needs an approved contract, and most rows here test the rules
+# that hold with no task at all. Rows that need a task branch make their own.
+g "$fx" worktree add -q -b feature/demo "$fx/.worktrees/demo" HEAD
 wt="$fx/.worktrees/demo"
 
 # guard <expected-exit> <name> <file> [maintainer]
@@ -178,9 +180,18 @@ guard 2 "symlinked root: contract outside" "$aux/linked/src/other.py"
 printf '# Contract: demo\n## Target files\n- src/*\n' > "$wt/.agent/contracts/demo.md"
 ( cd "$wt" && "$ROOT/scripts/contract-approve.sh" demo ) >/dev/null
 guard 2 "danger zone needs specific glob" "$wt/src/billing/pay.py"
-echo ghost > "$wt/.agent/state/active-task"
-guard 0 "a different active-task changes nothing"  "$wt/src/app.py"
 rm -f "$wt/.agent/state/active-task"
+# Its own task branch: only there does the id come from the branch and not from active-task.
+g "$fx" worktree add -q -b task/own "$fx/.worktrees/own" HEAD
+own="$fx/.worktrees/own"
+mkdir -p "$own/.agent/contracts"
+printf '# Contract: own\n## Target files\n- src/*\n' > "$own/.agent/contracts/own.md"
+( cd "$own" && "$ROOT/scripts/contract-approve.sh" own ) >/dev/null
+echo ghost > "$own/.agent/state/active-task"
+guard 0 "a different active-task changes nothing"  "$own/src/app.py"
+g "$fx" worktree remove --force "$own"
+g "$fx" branch -qD task/own
+rm -f "$fx/.git/harness/approved/own.sha256"
 
 # ---------------- 3. verify.sh ----------------
 code="$( unset HARNESS_MAINTAINER; "$fx/scripts/verify.sh" >/dev/null 2>&1; echo $? )"
@@ -289,8 +300,10 @@ mkdir "$st/.agent/state/stop-blocks-sstuck"
 stop 0 "loop breaker: unwritable count lets the stop through" sstuck false "LOOP BREAKER"
 rmdir "$st/.agent/state/stop-blocks-sstuck"
 
-# The missing-receipt block is bounded by the same breaker.
+# The missing-receipt block is bounded by the same breaker. Off task/*, so active-task names the
+# task: these are the only rows that show the Stop gate reading it.
 verify_exits 0
+g "$st" branch -qm task/stop feature/stop
 mkdir -p "$st/.agent/receipts"; echo demo > "$st/.agent/state/active-task"
 stop 2 "receipt missing: block 1" srcpt false "receipts/demo.md"
 stop 2 "receipt missing: block 2" srcpt true
@@ -300,6 +313,7 @@ stop 2 "receipt missing: streak restarts" srcpt false "receipts/demo.md"
 touch "$st/.agent/receipts/demo.md"
 stop 0 "receipt written: allowed" srcpt true
 rm -f "$st/.agent/state/active-task" "$st/.agent/receipts/demo.md"
+g "$st" branch -qm feature/stop task/stop
 
 # ---------------- 5. settings.json ----------------
 settings="$ROOT/.claude/settings.json"

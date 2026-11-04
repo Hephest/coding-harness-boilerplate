@@ -124,8 +124,21 @@ approval_file() {
   printf '%s/harness/approved/%s.sha256\n' "$common" "$2"
 }
 
-# approval_hint <root> <id> : what to do about a blocked approval.
+# task_id_ok <id> : the same test scripts/contract-approve.sh makes, so the guard never offers a
+# command that script refuses.
+task_id_ok() {
+  case "$1" in ''|.*|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+}
+
+# approval_hint <root> <id> : what to do about a blocked approval. With no contract on disk there
+# is nothing to show or approve yet, and the script would refuse.
 approval_hint() {
+  if [ ! -f "$1/.agent/contracts/$2.md" ]; then
+    echo "Stop and ask the user to start this task with /task:" >&2
+    echo "  /task $2 <goal>" >&2
+    echo "Moving to another branch is not the fix: this work still needs an approved contract." >&2
+    return 0
+  fi
   echo "Show the user .agent/contracts/$2.md and ask them to run:" >&2
   echo "  ! scripts/contract-approve.sh $2" >&2
   echo "or, in a plain terminal:" >&2
@@ -134,46 +147,61 @@ approval_hint() {
 }
 
 # effective_task <root> <branch> : sets TASK_ID to the one id that drives approval and scope, empty
-# for no task, and TASK_RECORD to where its approval lives, empty when git can't say. On task/<id>
-# with a contract or an approval record that is <id>, whatever active-task says: the agent can
-# rewrite that file, so it can't be what picks the rules. Any other branch, and a task branch with
-# neither, goes by active-task. Worked out once per checkout per hook run.
+# for no task, TASK_RECORD to where its approval lives, empty when git can't say, and TASK_ON_BRANCH
+# to 1 when the id is the branch's. On task/<id> that is always <id>, contract or not: the agent can
+# rewrite active-task and move a contract away, so neither can be what picks the rules. Any other
+# branch goes by active-task. Worked out once per checkout per hook run.
 effective_task() {
-  local root="$1" branch="$2" id="" record=""
+  local root="$1" branch="$2" id="" record="" on_branch=""
   [ "${TASK_FOR:-}" = "$root:$branch" ] && return 0
   case "$branch" in
-    task/*) id="${branch#task/}"
-            # No common dir: the id stays, so approval_policy blocks instead of guessing.
-            if record="$(approval_file "$root" "$id")" \
-               && [ ! -f "$record" ] && [ ! -f "$root/.agent/contracts/$id.md" ]; then
-              id=""
-            fi ;;
+    task/*) id="${branch#task/}"; on_branch=1 ;;
+    *) id="$(active_task "$root")" ;;
   esac
-  if [ -z "$id" ]; then
-    id="$(active_task "$root")"
-    record=""
-    if [ -n "$id" ]; then record="$(approval_file "$root" "$id")"; fi
-  fi
-  TASK_ID="$id"; TASK_RECORD="$record"; TASK_FOR="$root:$branch"
+  # No common dir: the id stays and the record is empty, so approval_policy blocks, not guesses.
+  if [ -n "$id" ]; then record="$(approval_file "$root" "$id")"; fi
+  TASK_ID="$id"; TASK_RECORD="$record"; TASK_ON_BRANCH="$on_branch"; TASK_FOR="$root:$branch"
+}
+
+# task_unstarted <root> : after effective_task, true on a task branch with neither a contract nor
+# an approval record. File tests only, so the Stop gate can ask without running the policy. False
+# when git can't say, which is not the same as knowing there is nothing.
+task_unstarted() {
+  [ "$TASK_ON_BRANCH" = 1 ] && [ -n "$TASK_RECORD" ] && [ ! -f "$TASK_RECORD" ] \
+    && [ ! -f "$1/.agent/contracts/$TASK_ID.md" ]
 }
 
 # approval_policy <root> <id> <record> : the contract for this work must be the one a human
 # approved. Both come from effective_task, so blanking active-task doesn't skip this. An approval
-# outlives its contract, so deleting the contract doesn't either. The contract is read from the
-# checkout being written to. One pass per hook run: the contract doesn't change while a command is
-# being checked.
+# outlives its contract, so deleting the contract doesn't either, and on a task branch having no
+# contract at all blocks too. The contract is read from the checkout being written to. One pass per
+# hook run: the contract doesn't change while a command is being checked.
 approval_policy() {
   local root="$1" id="$2" record="$3" contract want="" got
   [ -n "$id" ] || return 0
   [ "${APPROVAL_PASSED:-}" = "$root:$id" ] && return 0
+  # A task/* branch has to be approved, and this one never can be: blocked, with no command to offer.
+  # Leaving it is the fix here, so the no-contract hint would be wrong.
+  if [ "$TASK_ON_BRANCH" = 1 ] && ! task_id_ok "$id"; then
+    echo "BLOCKED: the branch name 'task/$id' can't carry a task id: scripts/contract-approve.sh refuses '$id', so nothing on this branch can be approved." >&2
+    echo "Stop and ask the user to start the task again, with a task id without a slash, made of letters, digits, '.', '_' and '-', and not starting with '.' or '-':" >&2
+    echo "  /task <task-id> <goal>" >&2
+    return 2
+  fi
   if [ -z "$record" ]; then
     echo "BLOCKED: git can't name its common dir here, so the contract for '$id' can't be checked." >&2
     return 2
   fi
   contract="$root/.agent/contracts/$id.md"
+  if task_unstarted "$root"; then
+    echo "BLOCKED: this is a task branch, and .agent/contracts/$id.md doesn't exist, so nothing here is approved." >&2
+    approval_hint "$root" "$id"
+    echo "task/$id already exists, so skip the step of /task that creates the worktree." >&2
+    return 2
+  fi
   [ -f "$contract" ] || [ -f "$record" ] || return 0
   if [ ! -f "$contract" ]; then
-    echo "BLOCKED: '$id' was approved, but .agent/contracts/$id.md is missing here. Restore it." >&2
+    echo "BLOCKED: '$id' was approved, but .agent/contracts/$id.md is missing here. Restore it, or:" >&2
     approval_hint "$root" "$id"; return 2
   fi
   if [ ! -f "$record" ]; then

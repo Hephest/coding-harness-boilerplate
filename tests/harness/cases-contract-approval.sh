@@ -127,9 +127,94 @@ ca_bash  2 "approval: deleted contract, shell" "$ap" 'echo x > src/app.py' "was 
 cp "$aux/appr.md.keep" "$ac"
 ca_write 0 "approval: deleted contract: restored as approved" "$ap/src/app.py"
 
-# --- Criterion 5: no contract, no approval, no active task: as before ---
-ca_write 0 "approval: nothing to check" "$st/src/new.py"
-ca_bash  0 "approval: nothing to check, shell" "$st" 'echo x > src/new.py'
+# --- Criterion 5, replaced by v02-task-branch: off task/*, no active task means nothing to check ---
+ca_write 0 "approval: nothing to check" "$wt/src/new.py"
+ca_bash  0 "approval: nothing to check, shell" "$wt" 'echo x > src/new.py'
+
+# --- v02-task-branch: on task/<id> the contract has to be approved, even when there is none ---
+# ca_lacks <name> <path> <text> : blocked, and the message doesn't say this.
+ca_lacks() {
+  local err
+  err="$( unset HARNESS_MAINTAINER HARNESS_ROLE; input "$2" | "$BASH" "$fx/.claude/hooks/guard-write.sh" 2>&1 >/dev/null )"
+  if [ $? = 2 ] && [[ "$err" != *"$3"* ]]; then ok "guard: $1"; else bad "guard: $1 (says '$3' or wasn't blocked: $err)"; fi
+}
+g "$fx" worktree add -q -b task/nc "$fx/.worktrees/nc" HEAD
+nc="$fx/.worktrees/nc"
+nstate="$nc/.agent/state/active-task"
+mkdir -p "$nc/.agent/state" "$nc/.agent/contracts" "$nc/src/billing"
+
+ca_write 2 "task branch: no contract" "$nc/src/app.py" "contracts/nc.md doesn't exist"
+ca_bash  2 "task branch: no contract, shell" "$nc" 'echo x > src/app.py' "contracts/nc.md doesn't exist"
+ca_write 2 "task branch: no contract, new file" "$nc/src/new.py" "doesn't exist"
+ca_bash  2 "task branch: no contract, maintainer" "$nc" 'echo x > src/app.py' "doesn't exist" maint
+ca_write 2 "task branch: message: says to stop and ask" "$nc/src/app.py" "Stop and ask the user to start this task with /task"
+ca_write 2 "task branch: message: gives the command" "$nc/src/app.py" "/task nc <goal>"
+ca_write 2 "task branch: message: moving is not the fix" "$nc/src/app.py" "Moving to another branch is not the fix"
+ca_write 2 "task branch: message: the branch exists" "$nc/src/app.py" "task/nc already exists"
+ca_lacks "task branch: message: no approve command with nothing to approve" "$nc/src/app.py" "contract-approve.sh"
+ca_write 0 "task branch: agent dir: contract" "$nc/.agent/contracts/nc.md"
+ca_bash  0 "task branch: agent dir: shell" "$nc" 'echo x > .agent/contracts/nc.md'
+ca_write 0 "task branch: agent dir: receipts and state" "$nc/.agent/state/active-task"
+
+# The way out in the message, and the way round it that this contract closes.
+ca_contract "$nc" nc
+ca_write 2 "task branch: no contract: written, not approved" "$nc/src/app.py" "isn't approved"
+ca_write 2 "task branch: no contract: existing hint kept" "$nc/src/app.py" "! scripts/contract-approve.sh nc"
+ca_lacks "task branch: no contract: no /task hint once it exists" "$nc/src/app.py" "/task"
+mv "$nc/.agent/contracts/nc.md" "$aux/nc.md.moved"
+ca_write 2 "task branch: no contract: moved away" "$nc/src/app.py" "doesn't exist"
+ca_bash  2 "task branch: no contract: moved away, shell" "$nc" 'echo x > src/app.py' "doesn't exist"
+: > "$nstate"
+ca_write 2 "task branch: no contract: moved away, blank active-task" "$nc/src/app.py" "doesn't exist"
+ca_bash  2 "task branch: no contract: moved away, blank active-task, shell" "$nc" 'echo x > src/app.py' "doesn't exist"
+ca_write 2 "task branch: no contract: danger zone" "$nc/src/billing/pay.py" "doesn't exist"
+ca_contract "$nc" other
+ca_approve "$nc" other
+echo other > "$nstate"
+ca_write 2 "task branch: no contract: another approved contract in active-task" "$nc/src/app.py" "doesn't exist"
+rm -f "$nstate" "$nc/.agent/contracts/other.md" "$store/other.sha256"
+mv "$aux/nc.md.moved" "$nc/.agent/contracts/nc.md"
+ca_run 0 "task branch: message: the contract can then be approved" "$nc" nc
+ca_write 0 "task branch: message: and the write goes through" "$nc/src/app.py"
+g "$fx" worktree remove --force "$nc"
+g "$fx" branch -qD task/nc
+rm -f "$store/nc.sha256"
+
+# An id the script refuses: blocked, since task/* needs an approval it can never get, and the
+# message says so. Each id runs through the script too, so the two tests can't drift apart.
+for id in fix/login a+b -x 'a@b'; do
+  g "$fx" worktree add -q -b "task/$id" "$fx/.worktrees/slash" HEAD
+  sl="$fx/.worktrees/slash"
+  ca_run 1 "task branch: slash id: $id: the script refuses it" "$sl" "$id" "not a task id"
+  ca_write 2 "task branch: slash id: $id: blocked" "$sl/src/app.py" "can't carry a task id"
+  ca_bash  2 "task branch: slash id: $id: blocked, shell" "$sl" 'echo x > src/app.py' "can't carry a task id"
+  ca_write 2 "task branch: slash id: $id: says what to do" "$sl/src/app.py" "a task id without a slash"
+  ca_lacks "task branch: slash id: $id: no command that can't work" "$sl/src/app.py" "contract-approve.sh $id"
+  ca_lacks "task branch: slash id: $id: no /task with this id" "$sl/src/app.py" "/task $id"
+  ca_lacks "task branch: slash id: $id: leaving is the fix here" "$sl/src/app.py" "Moving to another branch"
+  ca_write 0 "task branch: slash id: $id: agent dir" "$sl/.agent/contracts/new.md"
+  mkdir -p "$(dirname "$sl/.agent/contracts/$id.md")"
+  printf '# Contract\n## Target files\n- src/app.py\n' > "$sl/.agent/contracts/$id.md"
+  ca_write 2 "task branch: slash id: $id: a contract there changes nothing" "$sl/src/app.py" "can't carry a task id"
+  g "$fx" worktree remove --force "$sl"
+  g "$fx" branch -qD -- "task/$id"
+done
+# The edge of what the script takes: a dotted id is fine, and gets the ordinary message.
+g "$fx" worktree add -q -b task/a.b_c-1 "$fx/.worktrees/slash" HEAD
+ca_run 1 "task branch: slash id: a.b_c-1: the script takes it" "$sl" a.b_c-1 "no contract"
+ca_write 2 "task branch: slash id: a.b_c-1: ordinary message" "$sl/src/app.py" "/task a.b_c-1 <goal>"
+g "$fx" worktree remove --force "$sl"
+g "$fx" branch -qD task/a.b_c-1
+
+# The Stop gate: no contract and no record means no task to close, whatever active-task says.
+verify_exits 0
+stop 0 "no contract: no receipt asked for" snc1
+echo other > "$st/.agent/state/active-task"
+stop 0 "no contract: active-task changes nothing" snc2b
+rm -f "$st/.agent/state/active-task"
+: > "$store/stop.sha256"
+stop 2 "no contract: an approval record still asks for it" snc3 false "receipts/stop.md is missing"
+rm -f "$store/stop.sha256"
 
 # --- Criterion 6: the agent can't approve ---
 for rule in 'Bash(scripts/contract-approve.sh:*)' 'Bash(./scripts/contract-approve.sh:*)'; do
@@ -182,7 +267,7 @@ reader=jq; command -v jq >/dev/null 2>&1 || reader=python3
 nosha="$(tool_dir ca-nosha cat dirname git "$reader")"
 guard_raw 2 "approval: no hash tool: blocked" "$nosha" "$(input "$ap/src/app.py")" "sha256"
 guard_raw 0 "approval: no hash tool: .agent stays open" "$nosha" "$(input "$ac")"
-guard_raw 0 "approval: no hash tool: no contract, nothing to hash" "$nosha" "$(input "$st/src/new.py")"
+guard_raw 0 "approval: no hash tool: no contract, nothing to hash" "$nosha" "$(input "$wt/src/new.py")"
 for sha in shasum sha256sum; do
   if command -v "$sha" >/dev/null 2>&1; then
     guard_raw 0 "approval: $sha alone will do" "$(tool_dir "ca-$sha" cat dirname git "$reader" "$sha")" "$(input "$ap/src/app.py")"
@@ -258,12 +343,11 @@ g "$fx" branch -qD task/appr task/early feature/ca
 rm -f "$store/appr.sha256" "$store/early.sha256" "$fx/.agent/contracts/early.md"
 
 # --- For the case files after this one ---
-# They share task/demo and write this exact contract, so it has to be the approved one. Stub PATHs
-# need a hash tool now, or those rows would fail closed on it and prove nothing about what they test.
+# They share feature/demo and write this exact contract, so it has to be the approved one. Stub
+# PATHs need a hash tool now, or those rows would fail closed on it and prove nothing about what
+# they test.
 printf '# Contract: demo\n## Target files\n- src/app.py\n' > "$wt/.agent/contracts/demo.md"
 ca_approve "$wt" demo
-# Off task/*, so active-task alone switches the contract on, as these rows assume.
-g "$wt" branch -qm task/demo feature/demo
 tool_dir() {
   local d="$aux/$1" t; shift; mkdir -p "$d"
   for t in "$@" shasum sha256sum; do

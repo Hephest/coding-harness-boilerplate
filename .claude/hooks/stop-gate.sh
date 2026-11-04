@@ -64,9 +64,11 @@ fi
 
 [ $code -ne 0 ] && block "scripts/verify.sh failed (exit $code). Last lines:" "$out"
 
-# The same id the guard enforces, so blanking active-task doesn't skip the receipt.
+# The same id the guard enforces, so blanking active-task doesn't skip the receipt. A task branch
+# with neither contract nor record never started a task, so it has nothing to close.
 effective_task "$root" "$(git -C "$root" branch --show-current 2>/dev/null)"
 task="${TASK_ID:-}"
+if task_unstarted "$root"; then task=""; fi
 if [ -n "$task" ] && [ ! -f "$root/.agent/receipts/$task.md" ]; then
   block "verify passed, but .agent/receipts/$task.md is missing. Run the reviewer, then write the receipt from .agent/receipts/TEMPLATE.md."
 fi
