@@ -144,8 +144,12 @@ EOF
       --agent "$role" ${model_args[@]+"${model_args[@]}"} >/dev/null 2>"$dir/herdr.err" \
       || fail_start "agent start failed: $(cat "$dir/herdr.err")"
     # The prompt goes in as written, newlines included: flattening them changed what the task said.
-    herdr agent prompt "$id" "$(cat "$dir/prompt.md")" >/dev/null 2>>"$dir/herdr.err" \
-      || fail_start "agent prompt failed: $(cat "$dir/herdr.err")"
+    # --wait returns on the first working/blocked state seen after submission, so the idle the agent
+    # was showing before can't satisfy a later `agent wait`. If nothing is seen in 5s, herdr fails
+    # with agent_prompt_stalled: report that, and close the tab, rather than a run that never began.
+    herdr agent prompt "$id" "$(cat "$dir/prompt.md")" --wait --until working --until blocked \
+      >/dev/null 2>>"$dir/herdr.err" \
+      || fail_start "agent prompt failed (stalled or rejected): $(cat "$dir/herdr.err")"
   fi
   echo "$id"
 }
@@ -167,12 +171,8 @@ cmd_wait() {
     fi
     code="$(cat "$dir/exit_code")"
   else
-    # `agent wait` matches the state the agent is in right now, so straight after the prompt it
-    # returns on the idle the agent is still showing. First give it a moment to be seen working
-    # (or blocked/done), then wait for it to settle. A session that already finished stays idle,
-    # the first wait times out, and the second returns at once.
-    local grace=5000; [ "${timeout:-600000}" -lt "$grace" ] && grace="${timeout:-600000}"
-    herdr agent wait "$id" --until working --until blocked --until done --timeout "$grace" >/dev/null 2>&1 || true
+    # cmd_start already saw the agent leave idle (prompt --wait), so a plain wait can't match the
+    # old idle. A turn that finished long ago is idle now and returns at once: start now, wait later.
     out="$(herdr agent wait "$id" --timeout "${timeout:-600000}" 2>&1)" \
       || { echo "TIMEOUT: $id ($role) still working. Re-run: scripts/herdr-sub.sh wait $id" >&2; exit 124; }
     herdr agent read "$id" --source recent-unwrapped --lines 200 > "$dir/report.md" 2>/dev/null

@@ -36,12 +36,16 @@ case "$PAR_MAX" in ''|*[!0-9]*|0) PAR_MAX=2 ;; esac
 [ "$PAR_MAX" -gt 16 ] && PAR_MAX=16
 PAR_SEQ=0; PAR_HEAD=0; PAR_TAIL=0; PAR_PIDS=(); PAR_FILES=(); PF=""; PD=""
 par_reap() { # the oldest job: wait for it, then replay its lines
-  local line
-  wait "${PAR_PIDS[$PAR_HEAD]}" 2>/dev/null
+  local line st n=0
+  wait "${PAR_PIDS[$PAR_HEAD]}" 2>/dev/null; st=$?
   while IFS= read -r line; do
-    case "$line" in "PASS  "*) pass=$((pass + 1)) ;; "FAIL  "*) fail=$((fail + 1)) ;; esac
+    case "$line" in "PASS  "*) pass=$((pass + 1)); n=$((n + 1)) ;; "FAIL  "*) fail=$((fail + 1)); n=$((n + 1)) ;; esac
     printf '%s\n' "$line"
   done < "${PAR_FILES[$PAR_HEAD]}"
+  # A job that was killed or crashed has no say in the count above, so "0 failed" would still print.
+  if [ "$st" != 0 ] || [ "$n" = 0 ]; then
+    fail=$((fail + 1)); echo "FAIL  par: job $PAR_HEAD died (exit $st, $n result lines)"
+  fi
   PAR_HEAD=$((PAR_HEAD + 1))
 }
 par_begin() { # sets PF (the job's output file) and PD (a private dir name) once a slot is free
@@ -920,6 +924,23 @@ mf_case mf_str1
 mf_case mf_str2
 
 par_flush
+
+# A job that dies must count as a failure. par_dead <body…> runs one job in a subshell with its own
+# counters and scratch dir (nothing else is in flight here), and prints "<pass> <fail>".
+par_dead() {
+  ( aux="$aux/par-dead"; mkdir -p "$aux"; pass=0; fail=0
+    PAR_SEQ=0; PAR_HEAD=0; PAR_TAIL=0; PAR_PIDS=(); PAR_FILES=()
+    par_begin; "$@" > "$PF" & par_end $!
+    par_flush > /dev/null; echo "$pass $fail" )
+}
+pd_killed() { echo "PASS  half done"; bash -c 'kill -9 $$'; }
+pd_exit3()  { echo "PASS  looked fine"; exit 3; }
+pd_silent() { :; }
+pd_good()   { echo "PASS  fine"; }
+[ "$(par_dead pd_killed)" = "1 1" ] && ok "par: dead job: killed job counts as FAIL" || bad "par: dead job: killed job counts as FAIL (got '$(par_dead pd_killed)')"
+[ "$(par_dead pd_exit3)" = "1 1" ] && ok "par: dead job: non-zero exit counts as FAIL" || bad "par: dead job: non-zero exit counts as FAIL (got '$(par_dead pd_exit3)')"
+[ "$(par_dead pd_silent)" = "0 1" ] && ok "par: dead job: silent job counts as FAIL" || bad "par: dead job: silent job counts as FAIL (got '$(par_dead pd_silent)')"
+[ "$(par_dead pd_good)" = "1 0" ] && ok "par: dead job: healthy job is not a FAIL" || bad "par: dead job: healthy job is not a FAIL (got '$(par_dead pd_good)')"
 
 # Wired into settings.json, with a timeout of its own
 hook_setting() { # hook_setting <field>: matcher or timeout of the guard-bash entry
