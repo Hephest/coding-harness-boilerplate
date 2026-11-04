@@ -82,7 +82,7 @@ g "$fx" worktree add -q -b task/rgfree "$fx/.worktrees/rgfree" HEAD
 rf="$fx/.worktrees/rgfree"
 mkdir -p "$rf/.agent/state" "$rf/.agent/contracts"
 printf '# Contract: wide\n## Target files\n- src/*\n' > "$rf/.agent/contracts/wide.md"
-rg_write 2 "other branch: task branch, nothing to enforce" "$rf/src/other.py" "contracts/rgfree.md doesn't exist"
+rg_write 2 "other branch: task branch without a contract blocks" "$rf/src/other.py" "contracts/rgfree.md doesn't exist"
 echo wide > "$rf/.agent/state/active-task"
 rg_write 2 "other branch: task branch without a contract, unapproved active-task" "$rf/src/other.py" "contracts/rgfree.md doesn't exist"
 rg_shell 2 "other branch: same, shell" "$rf" 'echo x > src/other.py' "contracts/rgfree.md doesn't exist"
