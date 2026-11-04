@@ -71,6 +71,14 @@ repo_root_checked() {
 # active_task <root> : task id from .agent/state/active-task, or empty
 active_task() { [ -f "$1/.agent/state/active-task" ] && tr -d '[:space:]' < "$1/.agent/state/active-task"; }
 
+# is_secret <rel> : true for a repo-relative path on the secrets list, at any depth in the tree.
+is_secret() {
+  case "$1" in
+    .env|.env.*|*/.env|*/.env.*|secrets/*|*.pem|*.key|*.p12|*.pfx|id_rsa*|*/id_rsa*|.npmrc|*/.npmrc|.netrc|*/.netrc) return 0 ;;
+  esac
+  return 1
+}
+
 # path_policy <path> <cwd> : POLICY + CONTRACT invariants for one write. Every way of writing a file
 # (Edit, Write, a shell redirect) comes through here. Relative paths resolve against <cwd>, the
 # hook's .cwd, never $PWD. Returns 0 = allowed, 2 = blocked with the reason on stderr.
@@ -98,9 +106,10 @@ path_policy() {
 
   # 1. Blast radius: never touch secrets or local permission overrides, at any depth in the tree.
   #    These stay blocked even in maintainer mode.
+  if is_secret "$rel"; then
+    echo "BLOCKED: '$rel' is a protected path (secrets)." >&2; return 2
+  fi
   case "$rel" in
-    .env|.env.*|*/.env|*/.env.*|secrets/*|*.pem|*.key|*.p12|*.pfx|id_rsa*|*/id_rsa*|.npmrc|*/.npmrc|.netrc|*/.netrc)
-      echo "BLOCKED: '$rel' is a protected path (secrets)." >&2; return 2 ;;
     .claude/settings.local.json)
       echo "BLOCKED: '$rel' holds local permission overrides. Only the user edits it." >&2; return 2 ;;
   esac
