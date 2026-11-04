@@ -64,7 +64,9 @@ fi
 
 [ $code -ne 0 ] && block "scripts/verify.sh failed (exit $code). Last lines:" "$out"
 
-task="$(active_task "$root")"
+# The same id the guard enforces, so blanking active-task doesn't skip the receipt.
+effective_task "$root" "$(git -C "$root" branch --show-current 2>/dev/null)"
+task="${TASK_ID:-}"
 if [ -n "$task" ] && [ ! -f "$root/.agent/receipts/$task.md" ]; then
   block "verify passed, but .agent/receipts/$task.md is missing. Run the reviewer, then write the receipt from .agent/receipts/TEMPLATE.md."
 fi

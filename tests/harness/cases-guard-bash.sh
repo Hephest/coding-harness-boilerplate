@@ -602,14 +602,14 @@ wt	cat .en?
 wt	cat .en[v]
 wt	cat {.env,x}
 wt	cp src/app.py $DEST
-wt	cd "$X" && echo x > .env
-wt	cd - && cat .env
+wt	cd "$X" && echo x > src/app.py
+wt	cd - && cat src/app.py
 wt	$EDITOR .env
 wt	bash -c "bash -c 'cat .env'"
 wt	echo x | git apply
 wt	git apply %AUX%/missing.patch
 ROWS
-for needle in 'unresolved target: $F' 'unknown cwd for target: .env' 'unresolved command: $EDITOR' \
+for needle in 'unresolved target: $F' 'unknown cwd for target: src/app.py' 'unresolved command: $EDITOR' \
               'shell string nested too deep' 'git apply from stdin' 'no such patch'; do
   if grep -qF "$needle" "$gb_log"; then ok "guard-bash: logged: $needle"; else bad "guard-bash: logged: $needle"; fi
 done

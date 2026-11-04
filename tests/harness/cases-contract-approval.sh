@@ -262,6 +262,8 @@ rm -f "$store/appr.sha256" "$store/early.sha256" "$fx/.agent/contracts/early.md"
 # need a hash tool now, or those rows would fail closed on it and prove nothing about what they test.
 printf '# Contract: demo\n## Target files\n- src/app.py\n' > "$wt/.agent/contracts/demo.md"
 ca_approve "$wt" demo
+# Off task/*, so active-task alone switches the contract on, as these rows assume.
+g "$wt" branch -qm task/demo feature/demo
 tool_dir() {
   local d="$aux/$1" t; shift; mkdir -p "$d"
   for t in "$@" shasum sha256sum; do

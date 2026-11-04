@@ -179,7 +179,7 @@ printf '# Contract: demo\n## Target files\n- src/*\n' > "$wt/.agent/contracts/de
 ( cd "$wt" && "$ROOT/scripts/contract-approve.sh" demo ) >/dev/null
 guard 2 "danger zone needs specific glob" "$wt/src/billing/pay.py"
 echo ghost > "$wt/.agent/state/active-task"
-guard 2 "active task without contract"  "$wt/src/app.py"
+guard 0 "a different active-task changes nothing"  "$wt/src/app.py"
 rm -f "$wt/.agent/state/active-task"
 
 # ---------------- 3. verify.sh ----------------
