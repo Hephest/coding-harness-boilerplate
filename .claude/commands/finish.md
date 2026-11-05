@@ -15,3 +15,6 @@ Finish the active task (id in `.agent/state/active-task`).
    infrastructure fix (rule, test, script or hook). Don't edit hooks or settings yourself.
 6. Commit the receipt (and lessons) with message `<task-id>: receipt`.
 7. Don't push or merge. Tell me the branch name and the receipt status.
+
+If the guard blocks a write because the contract changed since it was approved, say so and ask me
+to run `! scripts/contract-approve.sh <task-id>` again. Don't work around the block.

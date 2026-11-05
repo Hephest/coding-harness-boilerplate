@@ -9,46 +9,121 @@ Code's permission prompts, git review before merging, and least-privilege creden
 
 ## Threat model
 
+The Edit/Write guard is exact: it sees the path the tool will touch. The Bash guard is
+**best effort**: it lexes the command, looks at the arguments of commands it knows, and passes
+what it can't resolve (see Known limitations).
+
 | In scope (the harness should stop it) | Out of scope (use other controls) |
 |---|---|
-| Claude editing secrets through Edit/Write: `.env`, `.env.*`, `.npmrc`, `.netrc`, `id_rsa*`, `*.pem`, `*.key`, `*.p12`, `*.pfx` at any depth, top-level `secrets/` | Arbitrary shell commands that write files or read secrets |
-| Claude editing on `main` or a detached HEAD instead of a task worktree | A user who disables hooks or runs with `--dangerously-skip-permissions` |
-| Claude editing files outside the active contract or in a danger zone, also through a symlink | Malicious code in your dependencies or MCP servers |
-| Claude changing its hooks, `settings.json`, `.claude/settings.local.json`, agents, skills, slash commands, `protected-paths`, `verify.sh`, `herdr-sub.sh` or the self-test in `tests/harness/` | Compromised machine or Claude Code installation |
-| Claude editing `.git` internals | |
-| A write going through unchecked because the hook input can't be parsed (the guard fails closed) | |
-| Claude declaring "done" while `verify.sh` fails, for up to 3 blocked stops in a row (see limitation 8) | |
+| Claude editing secrets through Edit/Write: `.env`, `.env.*`, `.npmrc`, `.netrc`, `id_rsa*`, `*.pem`, `*.key`, `*.p12`, `*.pfx` at any depth, top-level `secrets/` | Shell commands the Bash guard doesn't know, or can't resolve (interpreter one-liners, variables, globs) |
+| The same secrets through a known shell command: redirects, `tee`, `cp`, `mv`, `sed -i`, `cat`, `grep` and similar, also behind `sudo`, `doas`, `setsid`, `stdbuf`, `ionice`, `env`, `nice`, `timeout` or `xargs`, and when the path is written as `$'...'` or `$"..."`. A relative path after a `cd` the guard can't resolve (`cd -`, `cd $X`) is judged from the last known directory, so `cd - && cat .env` blocks. Writing `.env.example` blocks too; reading it doesn't | A user who disables hooks or runs with `--dangerously-skip-permissions` |
+| Claude editing on `main` or a detached HEAD instead of a task worktree, also by shell redirect or `sed -i` | Malicious code in your dependencies or MCP servers |
+| Claude editing files outside the contract of its task or in a danger zone, also through a symlink or a known shell command. The task is the one id from the branch name on `task/<id>` (see limitation 4) | Compromised machine or Claude Code installation |
+| Claude changing its hooks, `settings.json`, any file directly under `.claude/`, `CLAUDE.md`, `.claude/rules/`, agents, skills, slash commands, `protected-paths`, `verify.sh`, `herdr-sub.sh`, `harness-init.sh`, `contract-approve.sh` or the self-test in `tests/harness/`, by Edit, Write, NotebookEdit or a known shell command | |
+| Claude editing `.git` internals, or writing to a whole repository at once: `git restore .`, `find . -delete`, a bare `tar -x` or `unzip` at the repo root all block | |
+| Claude widening its own scope by editing a contract: work on a task needs a contract that a human approved (`scripts/contract-approve.sh <id>`), and an edit to it voids the approval | |
+| Claude approving a contract itself, by the known routes: the guard and `settings.json` refuse `contract-approve.sh` run directly, through `sh` or `bash`, by a glob that matches it, or fed to `bash -s` on stdin, also in maintainer mode. **Best effort only**: see limitation 12 | An agent that copies the script and `_lib.sh` elsewhere, or writes the approval record with a tool the guard doesn't know |
+| `git push`, `git reset` and `git add -f` in any flag position (`git add -A -f`, `--force`, a shortened `--forc`): blocked by the Bash guard, and by `settings.json` deny rules for the plain forms. Also `git config` keys that run code or skip hooks, by the Bash guard only and not in maintainer mode: `core` (as a whole section), `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`, `core.editor`, `alias.*`, `include.path`, `includeIf.*`, `diff.external`, `diff.<name>.*`, `merge.<name>.*`, `difftool.*`, `mergetool.*`, `pager.*`, `sequence.editor`, `filter.*`, `credential.*` and `gpg.*` | |
+| `rm`, `curl` and `wget`: blocked by `settings.json` deny rules alone. The Bash guard doesn't block them (it does check what `rm` would delete against the write policy), so they depend on Claude Code applying the deny rules | |
+| The reviewer agent doing anything but `scripts/verify.sh` and `git diff|log|show|status`, piped into `head`, `tail`, `grep` or `wc`. Anything it can't check blocks | |
+| A write or command going through unchecked because the hook input can't be parsed, or because `git` is missing or failing (both guards fail closed) | |
+| Claude declaring "done" while `verify.sh` fails, for up to 3 blocked stops in a row (see limitation 11) | |
 
-## Known limitations (v0.1)
+## Known limitations (v0.2)
 
-These are tracked for v0.2:
+1. **The Bash guard inspects known commands only.** Interpreter one-liners (`python -c`,
+   `node -e`), `find -exec sh -c` with placeholders, targets held in variables, globs or brace expansion (`{a,b}`, `{1..3}`), and
+   anything else it can't resolve pass, and are logged to `.agent/state/guard-bash.log`. A shell
+   string inside a shell string is looked at one level deep. After a `cd` it can't resolve, a
+   relative target is judged from the last known directory, which may not be where the command
+   really runs. Read that log if you suspect something got through.
+2. **Lexer limits pass and log.** A command past a limit (word length, path length, nesting
+   depth, number of checked targets, or the 15-second clock) is treated as one the guard can't
+   lex. It passes and is logged. The one exception is the reviewer role, which fails closed.
+3. **Some git commands aren't blocked.** `git commit --no-verify`, `git update-ref`,
+   `git stash`, `git clean` and `git merge` pass. Review what lands on your branch. See
+   limitation 14 for the commands that can bring in changes to harness files.
+4. **One task id, and none off a task branch.** A branch named `task/<id>` always has task id
+   `<id>`, and `.agent/state/active-task` is ignored there, because the agent can rewrite it. A
+   write outside `.agent/` on that branch needs `.agent/contracts/<id>.md` to exist and be
+   approved, so a hand-made `task/*` branch blocks until `/task` has been run for it. An id that
+   `scripts/contract-approve.sh` would refuse (a slash, as in `task/fix/login`, or `+`, `@`, a
+   leading `-` or `.`) blocks with a message saying so, because it can never be approved. The Stop
+   gate skips the receipt check on a task branch with neither a contract nor an approval record.
+   On any other branch `active-task` decides, and its contract has to be approved too. With
+   neither a task branch nor an active task, only the protected paths, the harness files and the
+   `main` rule apply. The limit: moving to another branch leaves all of this behind (limitation 13).
+5. **Approval depends on `!` commands, which Claude Code doesn't document.** It isn't stated
+   whether `!` commands are subject to deny rules. The deny on `contract-approve.sh` in
+   `settings.json` may refuse your own `! scripts/contract-approve.sh <id>`. If it does, run it
+   in a plain terminal. The approval itself (a hash under `.git/`) is only as strong as your
+   habit of reading the contract before you approve it.
+6. **A PreToolUse timeout doesn't block.** A hook that runs past its timeout fails open: the
+   command runs unchecked and unlogged. The Bash guard works against this with hard limits (see
+   2) and a 30-second timeout, but it is a limit of Claude Code, not something the harness can fix.
+7. **The reviewer's Bash allowlist is enforced by the guard.** The reviewer is recognized by
+   the hook's `agent_type` or by `HARNESS_ROLE`. If neither reaches the hook, the guard sees an
+   ordinary session.
+8. **Not every behaviour-shaping file is guarded.** `.agent/lessons.md` and a module's own
+   `CLAUDE.md` stay writable: `/finish` appends to the lessons file.
+9. **Self-written contracts are still possible before approval.** `.agent/` is writable so
+   `/task` can create a contract. The approval step makes a changed contract visible; it
+   doesn't stop the agent writing one. Approval stops it being used unseen, nothing more.
+10. **`ask` rules only suit sessions you are watching.** A prompt is only as good as whoever
+    answers it. While testing this harness with unattended background sessions, `ask` prompts
+    for `rm` were resolved with nobody answering them, and the cause wasn't found. So
+    `git push`, `git reset` and `rm` are `deny` rules, which hold in every permission mode and
+    show no dialog. Anything you add that must never run unattended belongs in `deny` too.
+11. **The Stop gate is bounded on purpose.** It blocks at most 3 stops in a row, then allows
+    the next one so a session can't be trapped. `verify.sh` exit 78 (no sensors) blocks once per
+    session, then allows the stop. A stop that gets through this way isn't verified, so check
+    the receipt before you merge.
+12. **Self-approval is best effort.** The guard and `settings.json` refuse the known routes:
+    running `contract-approve.sh` directly, through `sh` or `bash`, by a glob that matches it, and
+    `bash -s` reading it from stdin. They don't stop an agent that copies the script and
+    `.claude/hooks/_lib.sh` somewhere else and runs the copy (`cp` of either passes the guard), or
+    that writes the record under `.git/harness/approved/` with a tool the guard doesn't know, or
+    with a path it can't resolve (`$(git rev-parse --git-common-dir)/...` passes). The approval is
+    a guardrail for a cooperative agent: it makes an unseen contract change visible, and it isn't
+    proof that a human looked. Read the diff of a contract before you rely on it.
 
-1. **Shell writes bypass the guard.** The guard runs on Edit/Write/MultiEdit only, so
-   `sed -i`, `tee` or `echo >` through the Bash tool are not checked.
-2. **Self-written contracts.** `.agent/` is writable so `/task` can create a contract, which
-   means the agent could also widen its own scope. The human "yes" before a task starts is a
-   convention, not an enforcement.
-3. **Reading secrets via the shell.** `settings.json` denies the Read tool on `.env`, `.env.*`,
-   `secrets/**`, `*.pem` and `*.key`, but not `cat .env` through Bash.
-4. **The force-add deny is prefix-only.** `settings.json` denies `git add -f` and
-   `git add --force`, but only at the start of the command, so `git add -A -f` may pass and
-   stage an ignored secret. Review what you commit.
-5. **The reviewer agent has unrestricted Bash** so it can run `verify.sh`.
-6. **Not every behaviour-shaping file is guarded.** `CLAUDE.md`, `.claude/rules/` and
-   `.agent/lessons.md` stay writable through Edit/Write, and `NotebookEdit` isn't matched by
-   the guard at all.
-7. **The guard fails open when `git` is missing.** It finds the repo with `git`, so without it
-   every path looks like it's outside a repo. Only the `.git` check runs, and the write is
-   allowed.
-8. **The Stop gate is bounded on purpose.** It blocks at most 3 stops in a row, then allows the
-   next one so a session can't be trapped. `verify.sh` exit 78 (no sensors) blocks once per
-   session, then allows the stop. A stop that gets through this way isn't verified, so check
-   the receipt before you merge.
-9. **`ask` rules only suit sessions you are watching.** A prompt is only as good as whoever
-   answers it. While testing this harness with unattended background sessions, `ask` prompts for
-   `rm` were resolved with nobody answering them, and the cause wasn't found. So `git push`,
-   `git reset` and `rm` are `deny` rules, which hold in every permission mode and show no
-   dialog. Anything you add that must never run unattended belongs in `deny` too.
+    Other routes to the script also pass, by decision: `bash -c "$(cat scripts/contract-approve.sh)"`,
+    `bash <(cat scripts/contract-approve.sh)`, `env -S`, and `find -exec` running it. `\u` escapes
+    inside `$'...'` stay unresolved, and so does brace expansion. Only a deliberately evasive agent
+    types these, and one that can run an interpreter could forge the record anyway. All of them are
+    logged to `.agent/state/guard-bash.log` when the guard can't resolve them.
+13. **Leaving a task branch drops its enforcement.** `git branch -m`, `-M`, `git switch` and
+    `git checkout` to another branch pass the guard. Once the branch isn't called `task/<id>`, the
+    task id comes from `active-task` again, and with none set the approval and scope checks stop
+    applying (limitation 4). The `main` rule and the protected paths still hold.
+14. **Some commands can land changes in harness files.** `git am`, `git cherry-pick`, `git revert`,
+    `git rebase` and `git pull` pass the guard whatever they write, because it doesn't look inside a
+    commit. `git apply` is checked when it names a patch file it can read: the targets inside the
+    patch go through the write policy, and `git apply evil.patch` blocks. A patch on stdin
+    (`cat x | git apply`) passes, and so do `--check` and `--stat`, which write nothing.
+    Named-path forms such as `git checkout <rev> -- <file>` and
+    `git restore --source` are checked. Review the diff after any of them.
+15. **Readers are checked by named path only.** `grep -r` and `rg` on a directory (`grep -r KEY .`)
+    can read a secret by recursion, and a glob such as `grep KEY .env*` is unresolved. `git log -p`,
+    `git blame` and `git archive` aren't checked as readers, so `git log -p -- .env` and
+    `git archive HEAD .env` pass. `git show HEAD:.env` and `git diff HEAD -- .env` are checked.
+    Keep secrets out of the repository and out of its history.
+
+## Scope changes in v0.2
+
+These go further than the 0.1 contracts, so they can surprise you:
+
+- **One task id.** A `task/<id>` branch always has task id `<id>`, and `active-task` is ignored
+  there. Writes outside `.agent/` need that contract approved, even when the contract file is
+  missing, so a hand-made `task/*` branch blocks until `/task` has been run. Elsewhere
+  `active-task` decides, and its contract has to be approved.
+- **Everything directly under `.claude/` is a harness file**, not only the listed ones. Its
+  subdirectories are not, except `hooks`, `agents`, `skills`, `commands` and `rules`.
+- **Repo roots are protected.** A write that takes a whole repository (`git restore .`,
+  `find . -delete`, a bare `tar -x` or `unzip` at the root) blocks,
+  because it would take `.git` and the secrets with it. Name the paths inside instead.
+- **`.env.example` is write-protected.** Writing it blocks, because it matches `.env.*`.
+  Reading it (and `.env.sample`, `.env.template`) is fine. Edit it yourself.
 
 ## Reporting a vulnerability
 

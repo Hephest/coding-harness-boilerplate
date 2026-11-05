@@ -28,7 +28,8 @@ for f in "${scripts[@]}"; do
 done
 if command -v shellcheck >/dev/null 2>&1; then
   # -x follows the `. _lib.sh` source; severity error keeps style nits out of the gate.
-  if out="$(cd "$ROOT" && shellcheck -x -S error "${scripts[@]}" 2>&1)"; then ok "shellcheck"; else bad "shellcheck"; printf '%s\n' "$out" | sed 's/^/      /'; fi
+  # -s bash because the cases-*.sh files are sourced and have no shebang.
+  if out="$(cd "$ROOT" && shellcheck -x -s bash -S error "${scripts[@]}" 2>&1)"; then ok "shellcheck"; else bad "shellcheck"; printf '%s\n' "$out" | sed 's/^/      /'; fi
 else
   echo "SKIP  shellcheck (not installed)"
 fi
@@ -55,7 +56,9 @@ g "$fx" init -q
   || { echo "FAIL  fixture is not its own repo, refusing to continue"; exit 1; }
 g "$fx" symbolic-ref HEAD refs/heads/main
 g "$fx" add -A && g "$fx" commit -qm "fixture"
-g "$fx" worktree add -q -b task/demo "$fx/.worktrees/demo" HEAD
+# Off task/*: a task branch always needs an approved contract, and most rows here test the rules
+# that hold with no task at all. Rows that need a task branch make their own.
+g "$fx" worktree add -q -b feature/demo "$fx/.worktrees/demo" HEAD
 wt="$fx/.worktrees/demo"
 
 # guard <expected-exit> <name> <file> [maintainer]
@@ -169,16 +172,27 @@ cat > "$wt/.agent/contracts/demo.md" <<'EOF'
 1. x
 EOF
 echo demo > "$wt/.agent/state/active-task"
+( cd "$wt" && "$ROOT/scripts/contract-approve.sh" demo ) >/dev/null
 guard 0 "contract scope: target"        "$wt/src/app.py"
 guard 2 "contract scope: outside"       "$wt/src/other.py"
 guard 0 "danger zone named in contract" "$wt/src/billing/pay.py"
 guard 0 "symlinked root: contract target"  "$aux/linked/src/app.py"
 guard 2 "symlinked root: contract outside" "$aux/linked/src/other.py"
 printf '# Contract: demo\n## Target files\n- src/*\n' > "$wt/.agent/contracts/demo.md"
+( cd "$wt" && "$ROOT/scripts/contract-approve.sh" demo ) >/dev/null
 guard 2 "danger zone needs specific glob" "$wt/src/billing/pay.py"
-echo ghost > "$wt/.agent/state/active-task"
-guard 2 "active task without contract"  "$wt/src/app.py"
 rm -f "$wt/.agent/state/active-task"
+# Its own task branch: only there does the id come from the branch and not from active-task.
+g "$fx" worktree add -q -b task/own "$fx/.worktrees/own" HEAD
+own="$fx/.worktrees/own"
+mkdir -p "$own/.agent/contracts"
+printf '# Contract: own\n## Target files\n- src/*\n' > "$own/.agent/contracts/own.md"
+( cd "$own" && "$ROOT/scripts/contract-approve.sh" own ) >/dev/null
+echo ghost > "$own/.agent/state/active-task"
+guard 0 "a different active-task changes nothing"  "$own/src/app.py"
+g "$fx" worktree remove --force "$own"
+g "$fx" branch -qD task/own
+rm -f "$fx/.git/harness/approved/own.sha256"
 
 # ---------------- 3. verify.sh ----------------
 code="$( unset HARNESS_MAINTAINER; "$fx/scripts/verify.sh" >/dev/null 2>&1; echo $? )"
@@ -287,8 +301,10 @@ mkdir "$st/.agent/state/stop-blocks-sstuck"
 stop 0 "loop breaker: unwritable count lets the stop through" sstuck false "LOOP BREAKER"
 rmdir "$st/.agent/state/stop-blocks-sstuck"
 
-# The missing-receipt block is bounded by the same breaker.
+# The missing-receipt block is bounded by the same breaker. Off task/*, so active-task names the
+# task: these are the only rows that show the Stop gate reading it.
 verify_exits 0
+g "$st" branch -qm task/stop feature/stop
 mkdir -p "$st/.agent/receipts"; echo demo > "$st/.agent/state/active-task"
 stop 2 "receipt missing: block 1" srcpt false "receipts/demo.md"
 stop 2 "receipt missing: block 2" srcpt true
@@ -298,6 +314,7 @@ stop 2 "receipt missing: streak restarts" srcpt false "receipts/demo.md"
 touch "$st/.agent/receipts/demo.md"
 stop 0 "receipt written: allowed" srcpt true
 rm -f "$st/.agent/state/active-task" "$st/.agent/receipts/demo.md"
+g "$st" branch -qm feature/stop task/stop
 
 # ---------------- 5. settings.json ----------------
 settings="$ROOT/.claude/settings.json"
@@ -359,12 +376,17 @@ EOF
 
   # The hook itself, through a real commit from a linked worktree (that is what exports GIT_DIR).
   # Copied into the throwaway repo's .git/hooks, so core.hooksPath stays unset everywhere.
-  mkdir -p "$sac/.git/hooks"
-  cp "$ROOT/.githooks/pre-commit" "$sac/.git/hooks/pre-commit"
-  HOOK_PROBE="$aux/hook-env" g "$sac/.worktrees/hook" commit -q --allow-empty -m "hook probe"
-  if [ ! -f "$aux/hook-env" ]; then bad "git env leak: pre-commit ran the self-test"
-  elif [ -s "$aux/hook-env" ]; then bad "git env leak: pre-commit clears git env ($(tr '\n' ' ' < "$aux/hook-env"))"
-  else ok "git env leak: pre-commit clears git env"; fi
+  # harness-init doesn't copy .githooks/, so an installed project has no hook to run.
+  if [ -f "$ROOT/.githooks/pre-commit" ]; then
+    mkdir -p "$sac/.git/hooks"
+    cp "$ROOT/.githooks/pre-commit" "$sac/.git/hooks/pre-commit"
+    HOOK_PROBE="$aux/hook-env" g "$sac/.worktrees/hook" commit -q --allow-empty -m "hook probe"
+    if [ ! -f "$aux/hook-env" ]; then bad "git env leak: pre-commit ran the self-test"
+    elif [ -s "$aux/hook-env" ]; then bad "git env leak: pre-commit clears git env ($(tr '\n' ' ' < "$aux/hook-env"))"
+    else ok "git env leak: pre-commit clears git env"; fi
+  else
+    echo "SKIP  git env leak: pre-commit clears git env (no .githooks/pre-commit in this project)"
+  fi
 fi
 
 # ---------------- 7. .gitignore ----------------
@@ -475,6 +497,13 @@ if [ "${HARNESS_MAINTAINER:-}" = 1 ]; then
 else
   echo "SKIP  hygiene (HARNESS_MAINTAINER unset)"
 fi
+
+# ---------------- 11. topic case files ----------------
+# Each topic keeps its cases in its own file. They share this file's fixture and helpers.
+for cases in "$ROOT"/tests/harness/cases-*.sh; do
+  # shellcheck disable=SC1090
+  [ -f "$cases" ] && . "$cases"
+done
 
 echo "=== harness self-test: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

@@ -8,16 +8,19 @@ also a live test of the boilerplate.
 ```bash
 git clone https://github.com/Hephest/coding-harness-boilerplate && cd coding-harness-boilerplate
 git config core.hooksPath .githooks     # optional: run the self-test before every commit
-tests/harness/run.sh                    # should end with "0 failed"
+tests/harness/run.sh                    # about two minutes; should end with "0 failed"
 ```
+
+The pre-commit hook runs the same self-test, so every commit waits about two minutes.
 
 You need `bash`, `git`, and `jq` or `python3`. `shellcheck` is optional locally; CI always
 runs it.
 
 ## Maintainer mode
 
-In a normal project the guard blocks Claude from editing harness files: hooks, `settings.json`,
-`protected-paths`, agents, skills, slash commands, `verify.sh`, `herdr-sub.sh` and the self-test.
+In a normal project the guards block Claude from editing harness files: `CLAUDE.md`, rules, hooks,
+`settings.json` and every other file directly under `.claude/`, agents, skills, slash commands,
+`verify.sh`, `herdr-sub.sh`, `harness-init.sh`, `contract-approve.sh` and the self-test.
 That is the point. Here the harness files *are* the product, so maintainers start Claude with:
 
 ```bash
@@ -28,9 +31,9 @@ HARNESS_MAINTAINER=1 claude
 Set it at launch, from inside the worktree. `.claude/settings.local.json` is gitignored and
 doesn't exist in worktrees, so it can't carry the flag. In maintainer mode:
 
-- the guard allows edits to harness files
-- secrets, `.git` internals, `.claude/settings.local.json`, `main` and contract scope are
-  **still** enforced
+- the guards allow edits to harness files
+- secrets, `.git` internals, whole repositories, `.claude/settings.local.json`, `main`, contract
+  scope and contract approval are **still** enforced
 - with no project sensors configured, `scripts/verify.sh` runs `tests/harness/run.sh`
 
 Never ship maintainer mode as a default, and never document it as something template users
@@ -40,14 +43,19 @@ should turn on.
 
 1. **Contract.** `/task <id> <goal>` writes `.agent/contracts/<id>.md` (≤5 target files) and
    creates the `task/<id>` worktree. Split bigger changes.
-2. **Build** in the worktree. Every behaviour change to a hook or `verify.sh` gets a case in
-   `tests/harness/run.sh` that fails without the change.
-3. **Changelog:** add a line under `## [Unreleased]` in `CHANGELOG.md`.
-4. **Verify:** `HARNESS_MAINTAINER=1 scripts/verify.sh` must exit 0.
-5. **Finish:** `/finish` verifies, commits on the task branch, sends the `reviewer` agent to
+2. **Approve.** Read the contract, then run `scripts/contract-approve.sh <id>` yourself (the
+   agent can't). Edits on the branch block until you do, and again after any change to the
+   contract. On `task/<id>` the branch name sets the task, whatever `active-task` says. The
+   agent being unable to approve is best effort, so read the contract yourself.
+3. **Build** in the worktree. Every behaviour change to a hook or `verify.sh` gets a case that
+   fails without the change. New cases go in `tests/harness/cases-<topic>.sh`, which `run.sh`
+   sources; don't grow `run.sh` itself.
+4. **Changelog:** add a line under `## [Unreleased]` in `CHANGELOG.md`.
+5. **Verify:** `HARNESS_MAINTAINER=1 scripts/verify.sh` must exit 0.
+6. **Finish:** `/finish` verifies, commits on the task branch, sends the `reviewer` agent to
    review `git diff main...HEAD` cold, and writes the receipt with the real SHA. Review fixes
    are new commits.
-6. Open a pull request against `main`.
+7. Open a pull request against `main`.
 
 Contracts and receipts for this repo stay local (`.git/info/exclude`), so template users don't
 inherit our task history. The CHANGELOG is the public record.
