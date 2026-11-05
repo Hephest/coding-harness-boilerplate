@@ -28,7 +28,8 @@ for f in "${scripts[@]}"; do
 done
 if command -v shellcheck >/dev/null 2>&1; then
   # -x follows the `. _lib.sh` source; severity error keeps style nits out of the gate.
-  if out="$(cd "$ROOT" && shellcheck -x -S error "${scripts[@]}" 2>&1)"; then ok "shellcheck"; else bad "shellcheck"; printf '%s\n' "$out" | sed 's/^/      /'; fi
+  # -s bash because the cases-*.sh files are sourced and have no shebang.
+  if out="$(cd "$ROOT" && shellcheck -x -s bash -S error "${scripts[@]}" 2>&1)"; then ok "shellcheck"; else bad "shellcheck"; printf '%s\n' "$out" | sed 's/^/      /'; fi
 else
   echo "SKIP  shellcheck (not installed)"
 fi
